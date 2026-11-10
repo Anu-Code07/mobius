@@ -1,0 +1,22 @@
+{
+  "name": "mobius",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test 'packages/*/test/*.test.ts'",
+    "smoke": "node tests/e2e/smoke.ts",
+    "mcp": "node packages/host/src/cli.ts mcp",
+    "bench": "node packages/host/bench/break-mobius.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "~5.9.3"
+  }
+}

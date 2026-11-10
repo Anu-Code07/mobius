@@ -1,0 +1,6 @@
+node_modules/
+*.db
+.DS_Store
+dist/
+packages/host/README.md
+packages/host/LICENSE
