@@ -1,0 +1,17 @@
+{
+  "ok": false,
+  "action_id": "act_b24c74f7",
+  "status": "blocked",
+  "duration_ms": 0,
+  "state_changed": null,
+  "foreground_app": null,
+  "observation_id": null,
+  "verified": null,
+  "message": "User rejected: single tap on button \"Place order\"",
+  "error": {
+    "code": "APPROVAL_REJECTED",
+    "message": "User rejected: single tap on button \"Place order\"",
+    "retryable": false,
+    "hint": "Do not retry. Ask the user what they want instead."
+  }
+}

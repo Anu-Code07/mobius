@@ -1,0 +1,11 @@
+{
+  "ok": true,
+  "action_id": "act_871d0bec",
+  "status": "succeeded",
+  "duration_ms": 2486,
+  "state_changed": true,
+  "foreground_app": "dev.mobius.mobius_fixture",
+  "observation_id": "o45",
+  "verified": null,
+  "message": "Tapped button \"Book ride\""
+}
