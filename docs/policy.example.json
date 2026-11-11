@@ -1,0 +1,36 @@
+{
+  "version": "acme-2026-11-11",
+  "approval_auth": "device_owner",
+  "dry_run": false,
+  "rules": [
+    {
+      "id": "small-food-orders",
+      "description": "Agents may pay for food orders up to ₹200 without asking",
+      "effect": "allow",
+      "app": "bundl\\.swiggy|com\\.application\\.zomato",
+      "action_class": ["payment"],
+      "max_amount": 200
+    },
+    {
+      "id": "whatsapp-always-ask",
+      "description": "Every send in WhatsApp needs a human",
+      "effect": "approval_required",
+      "app": "com\\.whatsapp",
+      "action_class": ["send"]
+    },
+    {
+      "id": "no-account-deletion",
+      "description": "Agents never delete accounts, even with approval",
+      "effect": "blocked",
+      "action_class": ["delete"],
+      "target": "account"
+    },
+    {
+      "id": "qa-test-login",
+      "description": "Test accounts: typing vault secrets into login fields is fine",
+      "effect": "allow",
+      "tool": ["type"],
+      "action_class": ["secret"]
+    }
+  ]
+}
