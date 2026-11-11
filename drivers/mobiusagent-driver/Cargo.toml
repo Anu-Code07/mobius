@@ -1,0 +1,23 @@
+[package]
+name = "mobiusagent-driver"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Mobius device driver: one binary that drives Android (adb + on-device helper) and iOS (WebDriverAgent over usbmuxd) for Mobius. JSON lines over stdio."
+
+[dependencies]
+quick-xml = "0.36"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+plist = "1"
+# WebView/Chrome DevTools protocol (Android). MIT/Apache-2.0.
+tungstenite = "0.24"
+# iOS: start WebDriverAgent through Apple's test-manager protocol directly (no xcodebuild per start). MIT.
+idevice = { version = "0.1.68", features = ["xctest", "wda", "usbmuxd", "syslog_relay", "crashreportcopymobile", "installation_proxy", "afc", "house_arrest", "sysmontap", "graphics", "device_info"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "macros"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[profile.release]
+strip = true
+lto = true
