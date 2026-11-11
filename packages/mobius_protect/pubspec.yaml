@@ -1,0 +1,13 @@
+name: mobius_protect
+description: Declare sensitive actions (pay, book, send, delete…) in your Flutter app so AI agents operating it through Mobius must get a human's approval, whatever the button says.
+version: 0.1.0
+repository: https://github.com/Anu-Code07/mobius
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.19.0"
+dependencies:
+  flutter:
+    sdk: flutter
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
