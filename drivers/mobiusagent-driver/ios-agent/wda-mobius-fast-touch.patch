@@ -1,0 +1,73 @@
+diff --git a/WebDriverAgentLib/Commands/FBCustomCommands.m b/WebDriverAgentLib/Commands/FBCustomCommands.m
+index 97ecfbc..9a71636 100644
+--- a/WebDriverAgentLib/Commands/FBCustomCommands.m
++++ b/WebDriverAgentLib/Commands/FBCustomCommands.m
+@@ -31,6 +31,9 @@
+ #import "XCUIElement+FBIsVisible.h"
+ #import "XCUIElementQuery.h"
+ #import "FBUnattachedAppLauncher.h"
++#import "FBXCTestDaemonsProxy.h"
++#import "XCPointerEventPath.h"
++#import "XCSynthesizedEventRecord.h"
+ 
+ @implementation FBCustomCommands
+ 
+@@ -39,6 +42,9 @@
+   return
+   @[
+     [[FBRoute POST:@"/timeouts"] respondWithTarget:self action:@selector(handleTimeouts:)],
++    // Mobius fast touch: one raw event straight to the event synthesizer. No app lookup, no wait-for-stable.
++    [[FBRoute POST:@"/mobius/tap"].withoutSession respondWithTarget:self action:@selector(handleMobiusTap:)],
++    [[FBRoute POST:@"/mobius/swipe"].withoutSession respondWithTarget:self action:@selector(handleMobiusSwipe:)],
+     [[FBRoute POST:@"/wda/homescreen"].withoutSession respondWithTarget:self action:@selector(handleHomescreenCommand:)],
+     [[FBRoute POST:@"/wda/deactivateApp"] respondWithTarget:self action:@selector(handleDeactivateAppCommand:)],
+     [[FBRoute POST:@"/wda/keyboard/dismiss"] respondWithTarget:self action:@selector(handleDismissKeyboardCommand:)],
+@@ -134,6 +140,48 @@
+ 
+ #pragma mark - Helpers
+ 
++#pragma mark - Mobius fast touch
++
++static UIInterfaceOrientation FBMobiusOrientation(NSDictionary *args)
++{
++  NSString *o = args[@"orientation"];
++  if ([o isEqualToString:@"landscape_left"]) return UIInterfaceOrientationLandscapeLeft;
++  if ([o isEqualToString:@"landscape_right"]) return UIInterfaceOrientationLandscapeRight;
++  if ([o isEqualToString:@"upside_down"]) return UIInterfaceOrientationPortraitUpsideDown;
++  return UIInterfaceOrientationPortrait;
++}
++
++static id<FBResponsePayload> FBMobiusSynthesize(XCPointerEventPath *path, NSDictionary *args)
++{
++  XCSynthesizedEventRecord *record = [[XCSynthesizedEventRecord alloc] initWithName:@"Mobius touch"
++                                                               interfaceOrientation:FBMobiusOrientation(args)];
++  [record addPointerEventPath:path];
++  NSError *error;
++  if (![FBXCTestDaemonsProxy synthesizeEventWithRecord:record error:&error]) {
++    return FBResponseWithUnknownError(error);
++  }
++  return FBResponseWithOK();
++}
++
+++ (id<FBResponsePayload>)handleMobiusTap:(FBRouteRequest *)request
++{
++  CGPoint p = CGPointMake([request.arguments[@"x"] doubleValue], [request.arguments[@"y"] doubleValue]);
++  double hold = request.arguments[@"hold"] ? [request.arguments[@"hold"] doubleValue] : 0.05;
++  XCPointerEventPath *path = [[XCPointerEventPath alloc] initForTouchAtPoint:p offset:0];
++  [path liftUpAtOffset:hold];
++  return FBMobiusSynthesize(path, request.arguments);
++}
++
+++ (id<FBResponsePayload>)handleMobiusSwipe:(FBRouteRequest *)request
++{
++  NSDictionary *a = request.arguments;
++  double duration = a[@"duration"] ? [a[@"duration"] doubleValue] : 0.2;
++  XCPointerEventPath *path = [[XCPointerEventPath alloc] initForTouchAtPoint:CGPointMake([a[@"x1"] doubleValue], [a[@"y1"] doubleValue]) offset:0];
++  [path moveToPoint:CGPointMake([a[@"x2"] doubleValue], [a[@"y2"] doubleValue]) atOffset:duration];
++  [path liftUpAtOffset:duration + 0.01];
++  return FBMobiusSynthesize(path, a);
++}
++
+ + (id<FBResponsePayload>)handleGetScreen:(FBRouteRequest *)request
+ {
+   XCUIApplication *app = XCUIApplication.fb_systemApplication;
