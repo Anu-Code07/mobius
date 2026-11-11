@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Anu-Code07/mobius/docs/spec/session.schema.json",
+  "title": "Mobius agent session claims (MASP 0.1)",
+  "description": "Token = base64url(JSON claims) + '.' + base64url(Ed25519 signature over the first part).",
+  "type": "object",
+  "required": ["sub", "jti", "iat", "exp"],
+  "properties": {
+    "sub": { "type": "string", "description": "Agent identity, e.g. acme-refund-bot/2.1" },
+    "jti": { "type": "string", "description": "Session id, recorded on every audit entry" },
+    "iat": { "type": "integer", "description": "Issued at, Unix seconds" },
+    "exp": { "type": "integer", "description": "Expires at, Unix seconds" },
+    "policy_version": { "type": "string", "description": "The only policy version this session may act under" },
+    "iss": { "type": "string", "description": "Issuer (operator or team)" }
+  }
+}

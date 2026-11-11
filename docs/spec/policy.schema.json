@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Anu-Code07/mobius/docs/spec/policy.schema.json",
+  "title": "Mobius policy (MASP 0.1)",
+  "type": "object",
+  "properties": {
+    "version": { "type": "string", "description": "Policy version. Signed sessions bound to another version are refused." },
+    "blocked_apps": { "type": "array", "items": { "type": "string" }, "description": "Regex, anchored to the start of a package/bundle-id segment. Agents may not act in or read these apps." },
+    "approval_apps": { "type": "array", "items": { "type": "string" }, "description": "Every state-changing action in these apps needs approval." },
+    "risky_words": { "type": "array", "items": { "type": "string" }, "description": "Whole words that make a gesture need approval (any language)." },
+    "secret_entry": { "$ref": "#/$defs/decision" },
+    "submit": { "$ref": "#/$defs/decision" },
+    "approval_timeout_s": { "type": "integer", "minimum": 5 },
+    "approval_auth": { "enum": ["none", "device_owner"], "description": "device_owner: approving also needs the human's biometric/password." },
+    "dry_run": { "type": "boolean", "description": "Decide and audit, but don't ask for approval. Blocks still apply." },
+    "rules": { "type": "array", "items": { "$ref": "#/$defs/rule" }, "description": "First match wins. Rules may tighten anything; they never loosen a block." }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "decision": { "enum": ["allow", "approval_required", "blocked"] },
+    "action_class": { "enum": ["payment", "booking", "send", "delete", "account", "install", "permission", "secret", "unknown"] },
+    "rule": {
+      "type": "object",
+      "required": ["id", "effect"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$", "description": "Recorded on every decision this rule makes." },
+        "effect": { "$ref": "#/$defs/decision" },
+        "description": { "type": "string" },
+        "app": { "type": "string", "description": "Regex on the app id, anchored to a segment start." },
+        "tool": { "type": "array", "items": { "type": "string" } },
+        "action_class": { "type": "array", "items": { "$ref": "#/$defs/action_class" } },
+        "target": { "type": "string", "description": "Regex on the target's text, label or id." },
+        "max_amount": { "type": "number", "description": "Matches only when the amount is known and at most this." }
+      },
+      "additionalProperties": false
+    }
+  }
+}

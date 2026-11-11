@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Anu-Code07/mobius/docs/spec/audit-record.schema.json",
+  "title": "Mobius audit record (MASP 0.1)",
+  "description": "One JSON line per action. hash = sha256(JSON array of the hashed fields in order: action_id, ts, device_id, tool, params, status, error_code, duration_ms, agent, session_id, decision, rule_id, action_class, amount, prev_hash). sig = Ed25519 over `${hash}|${agent_session ?? ''}`. The first record's prev_hash is \"genesis\".",
+  "type": "object",
+  "required": ["action_id", "ts", "device_id", "tool", "params", "status", "duration_ms", "prev_hash", "hash"],
+  "properties": {
+    "action_id": { "type": "string" },
+    "ts": { "type": "string", "format": "date-time" },
+    "device_id": { "type": "string" },
+    "tool": { "type": "string" },
+    "params": { "type": "string", "description": "JSON of redacted parameters. Never typed text, secrets or screen content." },
+    "status": { "enum": ["succeeded", "failed", "blocked", "pending_approval", "outcome_unknown"] },
+    "error_code": { "type": ["string", "null"] },
+    "duration_ms": { "type": "integer" },
+    "agent": { "type": ["string", "null"], "description": "Session sub if a signed session was presented, else the client name" },
+    "session_id": { "type": ["string", "null"], "description": "Server session" },
+    "agent_session": { "type": ["string", "null"], "description": "Signed session jti" },
+    "decision": { "enum": ["allow", "approval_required", "blocked", null] },
+    "rule_id": { "type": ["string", "null"], "description": "builtin.*, app.declared, or a policy rule id" },
+    "action_class": { "type": ["string", "null"] },
+    "amount": { "type": ["number", "null"] },
+    "prev_hash": { "type": "string" },
+    "hash": { "type": "string" },
+    "sig": { "type": ["string", "null"] }
+  }
+}

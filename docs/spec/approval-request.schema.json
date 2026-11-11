@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Anu-Code07/mobius/docs/spec/approval-request.schema.json",
+  "title": "Mobius approval request (MASP 0.1)",
+  "description": "What an approver (dialog, webhook, Slack bot, phone) receives. The approver answers {\"decision\": \"approved\" | \"rejected\" | \"expired\"}. Anything else, an error or silence counts as rejected.",
+  "type": "object",
+  "required": ["id", "device_id", "tool", "summary", "reason"],
+  "properties": {
+    "id": { "type": "string" },
+    "device_id": { "type": "string" },
+    "virtual_device": { "type": "boolean" },
+    "app": { "type": ["string", "null"] },
+    "tool": { "type": "string" },
+    "summary": { "type": "string", "description": "Built from device state (the real button text), never from the agent's words" },
+    "reason": { "type": "string", "description": "Why approval is needed (the rule that fired)" },
+    "action_class": { "type": "string" },
+    "timeout_s": { "type": "integer" }
+  }
+}
