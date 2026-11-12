@@ -1,17 +1,265 @@
 # Mobius
 
-**Let AI agents use a real phone, safely.** · Website: https://anu-code07.github.io/mobius/
+**Your agent runs the phone. Mobius runs the trust.**
 
-Mobius is an open-source [MCP](https://modelcontextprotocol.io) server that lets Claude Code, Cursor or any MCP client operate Android and iOS devices. The agent sees a clean, masked view of the screen, every action is checked, and anything that spends money or sends something needs a human's approval.
+Mobius is an [MCP](https://modelcontextprotocol.io) server that lets Claude Code, Cursor or any MCP agent use a real Android phone, iPhone or simulator. The agent reads a clean, masked screen and taps through apps on its own. Anything that pays, books, sends or can't be undone waits for a human.
+
+**Website and film:** https://anu-code07.github.io/mobius/
 
 ```bash
 claude mcp add mobius -- npx -y @anuraghq/mobius mcp
 ```
 
-Then ask Claude: *"Open Settings on my phone and go to Network & internet."*
+Then ask: *"Open Settings on my phone and turn on dark mode."*
 
-<p align="center"><img src="docs/images/demo.gif" width="300" alt="Mobius driving a phone: food order stopped at Place order, cab booked with the OTP masked"></p>
-<p align="center"><sub>Real recording, 2× speed, headless Android emulator. Mobius orders food up to <b>Place order</b> (stopped for approval, rejected), then books a cab (approved; the OTP is masked for the agent). Regenerate with <code>node tests/e2e/demo.ts</code>.</sub></p>
+<p align="center"><a href="https://anu-code07.github.io/mobius/"><img src="site/assets/launch-poster.png" width="720" alt="The Mobius approval dialog on a Mac, holding an agent's tap on Pay ₹128 in Swiggy on a real iPhone"></a></p>
+<p align="center"><sub>From the launch film, recorded on a real iPhone: an agent orders a burger on Swiggy and Mobius holds the tap on <b>Pay ₹128</b> until a human decides. <a href="site/assets/launch.mp4">Watch the film (65 s)</a>.</sub></p>
+
+---
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Using Mobius](#using-mobius)
+- [Policies: deciding what needs you](#policies-deciding-what-needs-you)
+- [Approvals](#approvals)
+- [Command line](#command-line)
+- [Configuration reference](#configuration-reference)
+- [Troubleshooting](#troubleshooting)
+- [How it protects you](#what-the-agent-sees)
+
+---
+
+## Quick start
+
+### 1. Requirements
+
+- **Node 22.5+**
+- **macOS on Apple Silicon** for the npm package (it bundles the device driver for that platform). On Linux or an Intel Mac, build the driver from this repo (`cargo build --release` in `drivers/mobiusagent-driver`) and set `MOBIUS_DRIVER_BIN` to the binary.
+- **Android:** platform-tools (`adb`) and an emulator, or a phone with USB debugging on.
+- **iOS:** Xcode with a simulator, or an iPhone over USB with Developer Mode on.
+
+### 2. Connect a device
+
+**Android phone or emulator**
+```bash
+adb devices          # your phone or emulator should be listed as "device"
+```
+Nothing else to install: Mobius pushes its own small helper to the device the first time.
+
+**iPhone or iOS simulator** (once per Mac): Mobius drives iOS through a WebDriverAgent runner signed with your Apple developer team.
+```bash
+MOBIUS_TEAM_ID=XXXXXXXXXX npx -y @anuraghq/mobius setup-ios
+```
+Your team id is the "OU" of your *Apple Development* certificate (Keychain Access → My Certificates). On a real iPhone: trust the developer app once in Settings → General → VPN & Device Management, keep the phone unlocked, and for long sessions set Auto-Lock to Never.
+
+### 3. Add Mobius to your agent
+
+**Claude Code**
+```bash
+claude mcp add mobius -- npx -y @anuraghq/mobius mcp
+```
+
+**Cursor, Claude Desktop or any MCP client**
+```json
+{ "mcpServers": { "mobius": { "command": "npx", "args": ["-y", "@anuraghq/mobius", "mcp"] } } }
+```
+
+With environment variables (a policy, for example):
+```json
+{ "mcpServers": { "mobius": {
+  "command": "npx", "args": ["-y", "@anuraghq/mobius", "mcp"],
+  "env": { "MOBIUS_POLICY": "/Users/you/.mobius/policy.json" } } } }
+```
+
+### 4. Ask for something
+
+- *"What devices are connected?"*
+- *"On the emulator, open Settings and go to Network & internet."*
+- *"On my iPhone, search Apple Maps for Cubbon Park and zoom in."*
+- *"Find a kurta on Myntra and show me the first three results."*
+- *"Order a burger on Swiggy and stop at payment."* (Mobius will ask you before paying.)
+
+---
+
+## Using Mobius
+
+**How an agent works through Mobius.** It calls `observe` to read the screen as a short list of elements with ids (`o12:e5`), roles, text and boxes. Secrets are masked and screen text is marked as untrusted. Then it acts by id: `tap`, `type`, `scroll`, `press_key`, `open_app`. Every action:
+
+1. is checked by the policy against what is on screen **right now** (a fresh read, not the agent's old one),
+2. asks a human first if it could pay, book, send or can't be undone,
+3. runs on the device and waits for the screen to settle,
+4. is verified (optionally against an `expect` you pass, like `{"text_visible": "Order placed"}`),
+5. is written to the signed audit log.
+
+**Two tool sets.** The core tools (`observe`, `tap`, `type`, `scroll`, `open_app`, `wait_for` …) are what most agents need. The `mobius_*` set (87 tools) adds the full device toolkit: pinch and gestures, screenshots and recordings, `tap_text` (find by text, with OCR for unlabeled controls), `scroll_until_visible`, files, logs, performance and accessibility reports, network and location simulation, deep links and more. Both go through the same policy, approvals and audit. Set `MOBIUS_MOBILE_ALIASES=1` to also expose them as `mobile_*` for prompts written for other mobile MCP servers.
+
+**Errors are instructions.** Every failure has a code the agent can act on: `STALE_ELEMENT` (the screen changed, observe again), `ELEMENT_NOT_FOUND` with "covered by Toolbar, scroll it into view", `APPROVAL_REJECTED` (don't retry, ask the user), `DEVICE_LOCKED` (ask the user to unlock), `OUTCOME_UNKNOWN` (observe before retrying).
+
+---
+
+## Policies: deciding what needs you
+
+Mobius ships with safe defaults; you don't need a policy file to start. Write one when you want to **relax** a default ask for something you trust, or **tighten** something further.
+
+### How a decision is made
+
+For every action, in this order:
+
+1. **Hard blocks** (`blocked_apps`): banking, trading, UPI and password-manager apps can't be opened or read at all. Back, Home and Recents always work so the agent can leave. **No rule can loosen a hard block.**
+2. **What the app declares** (`mobius:payment:438:INR` on a control): trusted over any label.
+3. **What the target says, and what is drawn under the finger**: commit words in any wording (`risky_words`, 6 Indian languages, icon glyphs like `➤`), look-alike letters, words split across views, text read from the pixels (OCR) when the label is missing or lies.
+4. **Context**: a plain "Continue" on a screen showing an amount due, slide-to-pay gestures, OS permission prompts, typing into password/PIN/OTP fields (`secret_entry`), submitting text (`submit`), any action in `approval_apps` (messaging, social, fintech).
+5. **Your rules** (`rules`): first match wins and can change the decision (except a hard block).
+
+The result is `allow`, `approval_required` or `blocked`, with an **action class** (`payment`, `booking`, `send`, `delete`, `account`, `install`, `permission`, `secret`) and the rule id, all recorded in the audit log.
+
+### Writing a policy file
+
+Point `MOBIUS_POLICY` at a JSON file. Fields you set **replace** the default for that field (so setting `blocked_apps` replaces the whole built-in list); fields you leave out keep their defaults. Most people only set `version` and `rules`.
+
+```json
+{
+  "version": "riya-2026-11-12",
+  "rules": [
+    {
+      "id": "small-food-orders",
+      "description": "Agents may pay for food up to ₹200 without asking",
+      "effect": "allow",
+      "app": "bundl\\.swiggy|com\\.application\\.zomato",
+      "action_class": ["payment"],
+      "max_amount": 200
+    },
+    {
+      "id": "instagram-scroll-is-reading",
+      "description": "Scrolling Reels only reads; likes, comments and sends still ask",
+      "effect": "allow",
+      "app": "com\\.burbn\\.instagram",
+      "tool": ["scroll", "swipe"]
+    },
+    {
+      "id": "instagram-tabs-are-navigation",
+      "effect": "allow",
+      "app": "com\\.burbn\\.instagram",
+      "tool": ["tap"],
+      "target": "^(Reels|Main feed|Explore)$"
+    },
+    {
+      "id": "whatsapp-always-ask",
+      "effect": "approval_required",
+      "app": "com\\.whatsapp",
+      "action_class": ["send"]
+    },
+    {
+      "id": "never-delete-accounts",
+      "description": "Not even with approval",
+      "effect": "blocked",
+      "action_class": ["delete"],
+      "target": "account"
+    }
+  ]
+}
+```
+
+**Rule fields** (all optional except `id` and `effect`; a rule matches when every field you set matches):
+
+| Field | Matches | Example |
+|---|---|---|
+| `id` | Your name for the rule; recorded on every decision it makes | `"small-food-orders"` |
+| `effect` | What happens: `allow`, `approval_required` or `blocked` | `"allow"` |
+| `app` | Regex on the app id, from the start of a dotted segment | `"bundl\\.swiggy"` |
+| `tool` | The action: `tap`, `type`, `scroll`, `swipe`, `press_key`, `open_app`, `open_url`, or a `mobius_*` tool name | `["scroll", "swipe"]` |
+| `action_class` | What Mobius classified the action as | `["payment"]` |
+| `target` | Regex (case-insensitive) tried on the control's text, label and id separately, then together | `"^Reels$"` |
+| `max_amount` | Only when the amount is known and both it and the largest amount on screen are at most this | `200` |
+| `description` | Shown in the audit reason | |
+
+**Policy fields:**
+
+| Field | Default | What it does |
+|---|---|---|
+| `version` | `"default"` | Your label, recorded on every audit entry; signed sessions can be pinned to it |
+| `rules` | `[]` | The rules above |
+| `blocked_apps` | banking, trading, UPI, password managers | Apps that are refused outright (regexes on app-id segments) |
+| `approval_apps` | messaging, social, card/fintech apps | Apps where every state change asks |
+| `risky_words` | pay, order, buy, book, send, delete, confirm … in 7 languages | Words that make a tap ask |
+| `secret_entry` | `approval_required` | Typing into password / PIN / OTP fields |
+| `submit` | `approval_required` | Pressing Enter or submitting text |
+| `approval_timeout_s` | `90` | How long an approval waits before it expires (fails closed) |
+| `approval_auth` | `device_owner` on macOS | After Approve, also require Touch ID or your login password |
+| `dry_run` | `false` | Decide and audit, but don't ask (blocks still apply). For tuning rules |
+
+**Tips**
+- **Keep rules narrow.** Scope them to one app and one tool, and match on visible text where you can. A rule on a button *id* alone (for example `buy_button`) can match a different screen than you meant.
+- **Tune with `dry_run`.** Run your agent with `"dry_run": true` on an emulator, then read the decisions in `mobius audit export`: each entry has the decision, rule id, action class and amount.
+- **See every default** in [`packages/host/src/policy/policy.ts`](packages/host/src/policy/policy.ts) (`DEFAULT_POLICY`). There's a commented example in [`docs/policy.example.json`](docs/policy.example.json).
+
+---
+
+## Approvals
+
+When an action needs a human, Mobius holds it and asks:
+
+- **On a Mac (default):** a native *Mobius approval* dialog shows the app, the exact action ("single tap on button 'Pay ₹128 using PhonePe UPI'") and why it was held. **Reject** is the default button. **Approve** then asks for Touch ID or your login password, so an agent with a shell can't click it for you.
+- **Anywhere else:** set `MOBIUS_APPROVAL_WEBHOOK=<url>` (and `MOBIUS_APPROVAL_TOKEN`). Mobius POSTs each request to your Slack bot, push service or backend and waits for `{"decision": "approved"}`.
+
+Everything fails closed: no answer within `approval_timeout_s`, an unreachable webhook or a cancelled Touch ID all mean *rejected*. After an approval Mobius re-reads the screen, and if the target changed while you were deciding (bait and switch) the action is refused.
+
+---
+
+## Command line
+
+```bash
+npx -y @anuraghq/mobius <command>
+```
+
+| Command | What it does |
+|---|---|
+| `mcp` | Run the MCP server over stdio (what your agent starts) |
+| `serve [--port 7777] [--host 127.0.0.1]` | REST API with the same engine (`POST /v1/actions`, `GET /v1/tools`, `GET /v1/audit`) |
+| `setup-ios` | Build and sign the iOS runner once (needs `MOBIUS_TEAM_ID`) |
+| `stop` / `resume` | Kill switch: refuse every agent action on this machine, or allow them again |
+| `audit verify` | Check the audit log's hash chain and signatures |
+| `audit export` | Print the audit log as JSONL |
+| `session issue --agent <name> [--ttl 8h] [--policy-version v3]` | Mint a signed session token for an agent |
+| `session revoke <id>` | Revoke a session token |
+| `keys` / `keys --all` / `keys rotate` | Show or rotate the install's signing key |
+
+---
+
+## Configuration reference
+
+| Variable | What it does |
+|---|---|
+| `MOBIUS_POLICY` | Path to your policy JSON |
+| `MOBIUS_APPROVAL_WEBHOOK`, `MOBIUS_APPROVAL_TOKEN` | Send approvals to your own service |
+| `MOBIUS_SECRETS` | Comma-separated secret refs agents may type, e.g. `env:SHOP_PASS,keychain:shop/riya` |
+| `MOBIUS_OUTPUT_DIR` | Where screenshots, recordings and reports are written (default `~/.mobius/outputs`) |
+| `MOBIUS_MAX_ACTIONS`, `MOBIUS_MAX_SESSION_MIN` | Per-session quotas (default 1000 actions) |
+| `MOBIUS_SESSION_TOKEN` | A signed session for this agent (see `session issue`) |
+| `MOBIUS_REQUIRE_SESSION=1` | Refuse agents without a valid session |
+| `MOBIUS_SESSION_PUBKEY` | Verify sessions with an operator key instead of this install's |
+| `MOBIUS_API_TOKEN` | Bearer token for `serve` (generated if unset) |
+| `MOBIUS_TEAM_ID` | Apple developer team for `setup-ios` |
+| `MOBIUS_DRIVER_BIN` | Use a driver binary you built |
+| `MOBIUS_WDA_DIR` | Where the iOS runner is built (default `~/.mobius/wda`) |
+| `MOBIUS_HOME`, `MOBIUS_DB` | Where Mobius keeps its keys and audit log (default `~/.mobius`) |
+| `MOBIUS_MOBILE_ALIASES=1` | Also expose the toolkit as `mobile_*` |
+
+---
+
+## Troubleshooting
+
+| You see | Do this |
+|---|---|
+| No devices listed | Android: `adb devices` must show `device` (accept the USB debugging prompt). iOS: run `setup-ios` once; for a real iPhone, unlock it and trust this Mac. |
+| `DEVICE_LOCKED` | Unlock the phone. For long runs set Auto-Lock to Never. |
+| `No Mobius driver for linux-x64` (or similar) | The npm package bundles the Apple Silicon driver. Build it from this repo and set `MOBIUS_DRIVER_BIN`. |
+| `APPROVAL_REJECTED` on something harmless | The defaults lean safe. Check the reason with `mobius audit export`, then add a narrow `allow` rule for it. |
+| `ELEMENT_NOT_FOUND … covered by …` | Something floats over the target (a toolbar, the keyboard). `mobius_tap_text` and `mobius_scroll_until_visible` scroll it into view for you. |
+| An approval dialog never appears | It's waiting behind other windows, or you're not on macOS: use `MOBIUS_APPROVAL_WEBHOOK`. |
+
+---
 
 ### A real agent run
 
@@ -246,24 +494,7 @@ Each error comes with a `hint` telling the agent what to do next.
 
 ## Setup
 
-**Requirements**
-- Node 22.5+
-- Android: platform-tools (`adb`) with an emulator or a USB-debugging phone
-- iOS: Xcode with a simulator, or a real device over USB with developer setup
-
-**Claude Code**
-```bash
-claude mcp add mobius -- npx -y @anuraghq/mobius mcp
-```
-
-**Cursor / any MCP client**
-```json
-{ "mcpServers": { "mobius": { "command": "npx", "args": ["-y", "@anuraghq/mobius", "mcp"] } } }
-```
-
-**Policy** (optional): point `MOBIUS_POLICY` at a JSON file to change blocked apps, approval words and secret-entry rules. Defaults are in [`packages/host/src/policy.ts`](packages/host/src/policy.ts).
-
-**Audit log:** every action goes to `~/.mobius/mobius.db` (SQLite). Typed text is never stored.
+See [Quick start](#quick-start) and [Configuration reference](#configuration-reference).
 
 ---
 
