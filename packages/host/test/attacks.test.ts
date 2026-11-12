@@ -26,6 +26,10 @@ const CORPUS: Case[] = [
   { name: 'Proceed to pay', ctx: tap({ text: 'Proceed to pay' }), want: 'approval_required' },
   { name: 'resource id only: pay_now_button', ctx: tap({ resource_id: 'flights.review.pay_now_button' }), want: 'approval_required' },
   { name: 'resource id only: BOOK_NOW_CTA', ctx: tap({ resource_id: 'BOOK_NOW_CTA' }), want: 'approval_required' },
+  { name: 'resource id only: CONFIRM_ORDER_BTN', ctx: tap({ resource_id: 'CONFIRM_ORDER_BTN' }), want: 'approval_required' },
+  { name: 'unlabeled: confirm_btn', ctx: tap({ resource_id: 'confirm_btn' }), want: 'approval_required' },
+  { name: 'label Close, id pay_button (spoof)', ctx: tap({ label: 'Close', resource_id: 'pay_button' }), want: 'approval_required' },
+  { name: 'Swiggy "Add Item" with id CUSTOMIZATION_CONFIRM_BUTTON', ctx: tap({ label: 'Add Item', resource_id: 'CUSTOMIZATION_CONFIRM_BUTTON' }), want: 'allow' },
   { name: 'Send message', ctx: tap({ label: 'Send' }), want: 'approval_required' },
   { name: 'Delete account', ctx: tap({ text: 'Delete account' }), want: 'approval_required' },
   // Indian languages

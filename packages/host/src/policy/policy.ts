@@ -241,7 +241,14 @@ export class Policy {
     if (ctx.secretField) return out(this.config.secret_entry, 'typing into a password/PIN/OTP field', 'secret');
     const t = ctx.target;
     // camelCase ids split into words: btnPayNow, placeOrderButton.
-    const wordsOf = (e: Element) => readable(`${e.text ?? ''} ${e.label ?? ''} ${e.resource_id ?? ''}`).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_.]/g, ' ');
+    // A developer id backs up what the user sees. When the control has a readable label, generic verbs in its id
+    // ("CUSTOMIZATION_CONFIRM_BUTTON" behind "Add Item", Swiggy live run) don't make it a commit; strong ones (pay,
+    // order, buy, book) still do, and an unlabeled control is judged by its id alone.
+    const idWords = (e: Element) => {
+      const id = (e.resource_id ?? '').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_.:/-]/g, ' ');
+      return e.text || e.label ? id.replace(/\b(confirm|submit|agree|accept|request|reset|post|share)\b/gi, ' ') : id;
+    };
+    const wordsOf = (e: Element) => readable(`${e.text ?? ''} ${e.label ?? ''}`).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_.]/g, ' ') + ' ' + idWords(e);
     const words = t ? wordsOf(t) : '';
     const gesture = ctx.tool === 'tap' || ctx.tool === 'swipe' || ctx.tool === 'scroll';
     // Layer 0: the app itself declared this control sensitive. Trust the app over any label.
