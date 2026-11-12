@@ -1,16 +1,16 @@
 {
   "name": "@anuraghq/mobius",
   "version": "0.1.0",
-  "description": "Open-source MCP server that lets AI agents operate Android and iOS devices safely: low-noise observations, redaction, verified actions, policy and human approvals, audit log.",
+  "description": "Let AI agents use a real phone, safely. MCP server + its own fast device driver for Android, iPhones and iOS simulators: 75 tools, approvals, policy, masking, signed audit, performance and accessibility reports.",
   "license": "Apache-2.0",
   "type": "module",
   "bin": { "mobius": "dist/cli.js" },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": ["dist", "bin", "ios-agent", "README.md", "LICENSE"],
   "engines": { "node": ">=22.5" },
-  "keywords": ["mcp", "model-context-protocol", "android", "ios", "mobile", "ai-agent", "claude", "automation", "testing"],
+  "keywords": ["mcp", "model-context-protocol", "android", "ios", "iphone", "simulator", "emulator", "mobile", "ai-agent", "agent-safety", "claude", "automation", "testing", "qa", "performance", "accessibility"],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
-    "prepack": "npm run build && cp ../../README.md ../../LICENSE ."
+    "prepack": "npm run build && node scripts/prepack.mjs"
   },
   "publishConfig": { "access": "public" },
   "repository": "github:Anu-Code07/mobius",

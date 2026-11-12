@@ -192,6 +192,11 @@ pub fn wda_host(udid: &str) -> i32 {
 /// host (fast), then through xcodebuild (fallback).
 fn ensure_wda(udid: &str) -> R<Value> {
     if let Ok(v) = http(udid, "GET", "/status", None) { return Ok(v); }
+    // iOS allows one test runner per device: stop stale ones (ours, or an xcodebuild left behind) before starting.
+    for pat in [format!("__wda-host {udid}"), format!("xcodebuild test-without-building.*{udid}")] {
+        let _ = Command::new("pkill").args(["-f", &pat]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+    std::thread::sleep(Duration::from_millis(300));
     if std::env::var("MOBIUS_WDA_XCODEBUILD").is_err() && !is_sim(udid) {
         if let Ok(v) = start_direct(udid) { return Ok(v); }
     }

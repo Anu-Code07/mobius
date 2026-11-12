@@ -20,4 +20,7 @@ xcodebuild build-for-testing -project WebDriverAgent.xcodeproj -scheme WebDriver
   PRODUCT_BUNDLE_IDENTIFIER="${MOBIUS_WDA_BUNDLE:-dev.mobius.wda}" \
   -allowProvisioningUpdates -allowProvisioningDeviceRegistration -derivedDataPath "$DIR/build" | grep -E "error:|\*\* " || true
 "$HERE/brand.sh"
+# Simulators: an unsigned simulator build (no team needed).
+xcodebuild build-for-testing -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
+  -destination 'generic/platform=iOS Simulator' -derivedDataPath "$DIR/build-sim" CODE_SIGNING_ALLOWED=NO | grep -E "error:|\*\* " || true
 ls "$DIR"/build/Build/Products/*.xctestrun >/dev/null && echo "WebDriverAgent ready in $DIR"

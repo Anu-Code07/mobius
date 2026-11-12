@@ -10,8 +10,12 @@ import type { Capability, Framework, Key } from '../../core/protocol.ts';
 import { MobiusError, type Connector, type DeviceInfo, type Direction, type RawNode, type RawScreen, type TapMode } from '../connector.ts';
 import { detectAndroidFramework, toRawNode } from './nodes.ts';
 
-export const driverPath = () => process.env.MOBIUS_DRIVER_BIN
-  ?? fileURLToPath(new URL('../../../../../drivers/mobiusagent-driver/target/release/mobiusagent-driver', import.meta.url));
+/** The driver binary: $MOBIUS_DRIVER_BIN, the one bundled in the npm package for this platform, or a source build. */
+export const driverPath = () => {
+  if (process.env.MOBIUS_DRIVER_BIN) return process.env.MOBIUS_DRIVER_BIN;
+  const bundled = fileURLToPath(new URL(`../../../bin/mobiusagent-driver-${process.platform}-${process.arch}`, import.meta.url));
+  return existsSync(bundled) ? bundled : fileURLToPath(new URL('../../../../../drivers/mobiusagent-driver/target/release/mobiusagent-driver', import.meta.url));
+};
 /** The driver binary is built (`cargo build --release` in drivers/mobiusagent-driver). */
 export const driverBuilt = () => existsSync(driverPath());
 /** iOS needs WebDriverAgent built and signed once (drivers/mobiusagent-driver/ios-agent/setup.sh). */
@@ -43,7 +47,8 @@ export class MobiusAgentDriver {
     return p;
   }
 
-  call<T = any>(op: string, args: Record<string, unknown> = {}, timeoutMs = 30_000): Promise<T> {
+  // 2 minutes: the first iOS read may have to start the runner (seconds directly, up to ~90 s through xcodebuild).
+  call<T = any>(op: string, args: Record<string, unknown> = {}, timeoutMs = 120_000): Promise<T> {
     const p = this.proc ?? this.start();
     const id = this.next++;
     return new Promise<T>((ok, fail) => {
