@@ -141,7 +141,12 @@ export class MobiusAgentConnector implements Connector {
 
   async openApp(appId: string) {
     await this.drv.call('launch', { ...this.d, app: appId }).catch(e => {
-      throw new MobiusError('APP_NOT_INSTALLED', (e as Error).message, { hint: 'Call list_apps to see installed apps.' });
+      const msg = (e as Error).message;
+      // iOS refuses launches on a locked phone (FBSOpenApplicationErrorDomain code 7, "Locked"): not a missing app.
+      if (/\block(ed)?\b|FBSOpenApplicationErrorDomain Code=7\b|unlock/i.test(msg)) {
+        throw new MobiusError('DEVICE_LOCKED', `The phone is locked, so ${appId} could not be opened`, { retryable: true, hint: 'Ask the user to unlock the phone, then retry.' });
+      }
+      throw new MobiusError('APP_NOT_INSTALLED', msg, { hint: 'Call list_apps to see installed apps.' });
     });
   }
   async openUrl(url: string) { await this.drv.call('url', { ...this.d, url }); }

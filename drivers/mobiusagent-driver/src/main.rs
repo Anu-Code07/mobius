@@ -1447,7 +1447,8 @@ fn cli(args: Vec<String>) -> i32 {
     }
     let nums = |s: &str| s.split(',').filter_map(|t| t.trim().parse::<f64>().ok()).collect::<Vec<_>>();
     let first = pos.first().cloned().unwrap_or_default();
-    match op.as_str() {
+    // A positional fills the field only when given: `key --key lock` must not become key "".
+    if !pos.is_empty() { match op.as_str() {
         "tap" => { if first.starts_with('@') { req["ref"] = json!(first); } else { let n = nums(&first); if n.len() == 2 { req["x"] = json!(n[0]); req["y"] = json!(n[1]); } } }
         "swipe" => { let n = nums(&first); if n.len() == 4 { req["x1"] = json!(n[0]); req["y1"] = json!(n[1]); req["x2"] = json!(n[2]); req["y2"] = json!(n[3]); } }
         "location" => { let n = nums(&first); if n.len() == 2 { req["lat"] = json!(n[0]); req["lon"] = json!(n[1]); } }
@@ -1457,7 +1458,7 @@ fn cli(args: Vec<String>) -> i32 {
         "install" => req["path"] = json!(first),
         "url" => req["url"] = json!(first),
         _ => {}
-    }
+    } }
     if req.get("device").is_none() && op != "devices" {
         let online: Vec<String> = handle(&json!({ "op": "devices" })).ok().and_then(|v| v["devices"].as_array().cloned()).unwrap_or_default()
             .into_iter().filter(|d| d["state"] == "online").filter_map(|d| d["id"].as_str().map(String::from)).collect();

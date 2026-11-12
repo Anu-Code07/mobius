@@ -1,6 +1,6 @@
 # Mobius
 
-**Let AI agents use a real phone, safely.**
+**Let AI agents use a real phone, safely.** · Website: https://anu-code07.github.io/mobius/
 
 Mobius is an open-source [MCP](https://modelcontextprotocol.io) server that lets Claude Code, Cursor or any MCP client operate Android and iOS devices. The agent sees a clean, masked view of the screen, every action is checked, and anything that spends money or sends something needs a human's approval.
 
