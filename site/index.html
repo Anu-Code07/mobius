@@ -205,6 +205,19 @@ section.chapter { padding-block: clamp(72px, 11vw, 150px); border-top: 1px solid
 .legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 .controls { margin-top: 30px; color: var(--ink-2); font-size: 15px; max-width: 70ch; }
 
+/* attack popover */
+.pop { position: absolute; z-index: 20; width: min(320px, calc(100vw - 24px)); background: var(--ground-lift); color: var(--ink); border: 1px solid oklch(0.50 0.09 285); border-radius: 16px; padding: 16px 44px 16px 16px; box-shadow: 0 24px 60px -20px oklch(0.08 0.05 282 / .9); }
+.pop::before { content: ""; position: absolute; left: calc(var(--tip, 50%) - 7px); width: 14px; height: 14px; background: inherit; border: inherit; transform: rotate(45deg); }
+.pop[data-side="below"]::before { top: -8px; border-right: 0; border-bottom: 0; }
+.pop[data-side="above"]::before { bottom: -8px; border-left: 0; border-top: 0; }
+.pop-x { position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; border: 0; border-radius: 8px; background: transparent; color: var(--ink-2); font: 400 22px/1 var(--body); cursor: pointer; }
+.pop-x:hover { background: var(--ground); color: var(--ink); }
+.pop-cat { font: 600 13px var(--body); color: var(--ink-3); }
+.pop-what { font: 600 16px/1.4 var(--body); margin-top: 4px; }
+.pop-how { display: flex; gap: 10px; align-items: center; margin-top: 12px; font-size: 14px; color: var(--ink-2); }
+.pop-how .dicon { width: 32px; height: 32px; border-radius: 10px; flex: none; }
+.pop-how .dicon svg { width: 18px; height: 18px; }
+
 /* speed */
 .bars { display: grid; gap: 18px; margin-top: 8px; }
 .bar-row { display: grid; grid-template-columns: 170px minmax(0, 1fr) 70px; gap: 16px; align-items: center; font-size: 15px; }
@@ -243,6 +256,7 @@ footer a { color: var(--ink-2); }
 @media (max-width: 900px) {
   .hero, .split, .reads, .wallhead { grid-template-columns: 1fr; }
   .runlog li { grid-template-columns: 1fr; gap: 4px; }
+  .detail { display: none; }
   .console { margin-top: 24px; }
   .console-head .path { display: none; }
   .log { font-size: 12.5px; min-height: 150px; }
@@ -254,8 +268,15 @@ footer a { color: var(--ink-2); }
   .steps { grid-template-columns: 1fr; }
   .bar-row { grid-template-columns: 1fr 64px; }
   .bar-row .track { grid-column: 1 / -1; grid-row: 2; }
-  .reads { justify-items: center; row-gap: 72px; }
-  .readside { justify-items: stretch; width: 100%; }
+  /* Phone: heading and text first, then the screen with the hold control right under it, so the change is visible while holding. */
+  .reads { justify-items: stretch; row-gap: 20px; }
+  .readside { display: contents; }
+  .reads #h-reads { order: 1; }
+  .reads .readside > .lede { order: 2; }
+  #readsPhone { order: 3; justify-self: center; width: min(250px, 70vw); margin-top: 8px; }
+  .reads .holdrow { order: 4; justify-self: center; flex-direction: column; gap: 34px; margin-top: -150px; position: relative; z-index: 2; text-align: center; }
+  .reads .holdrow .pad { box-shadow: 0 0 0 1px var(--line), 0 10px 30px -8px oklch(0.10 0.05 282 / .6); }
+  .reads .readside > pre { order: 5; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: .01ms !important; animation: none !important; }
@@ -362,7 +383,7 @@ footer a { color: var(--ink-2); }
         <h2 id="h-wall">We threw 44 attacks at it. None got through.</h2>
         <p class="score" aria-label="44 of 44 attacks defended">44/44<small>scored on what happened on the device</small></p>
       </div>
-      <p class="lede" style="margin-top:22px">Break Mobius runs every attack end to end: hostile screens, disguised Pay buttons, look-alike letters, overlays, bait-and-switch during approval. An attack only counts as stopped if no money moved, no secret reached the model and nothing was sent. Pick one to see it.</p>
+      <p class="lede" style="margin-top:22px">Break Mobius runs every attack end to end: hostile screens, disguised Pay buttons, look-alike letters, overlays, bait-and-switch during approval. An attack only counts as stopped if no money moved, no secret reached the model and nothing was sent. Tap any tile to see the attack.</p>
       <div class="wall" id="wall"></div>
       <div class="legend">
         <span><i style="background:var(--sign)"></i>Stopped for your approval</span>
@@ -610,6 +631,34 @@ footer a { color: var(--ink-2); }
   const groups = {};
   A.forEach(([c, t, held]) => (groups[c] ??= []).push([t, held]));
   let pressed = null;
+  /* Tap a tile: a small popover next to it says what the attack was and what Mobius did (on phones the panel below is off screen). */
+  const pop = document.createElement('div');
+  pop.className = 'pop'; pop.setAttribute('role', 'dialog'); pop.setAttribute('aria-modal', 'false'); pop.hidden = true;
+  pop.innerHTML = '<button type="button" class="pop-x" aria-label="Close">×</button><p class="pop-cat"></p><p class="pop-what"></p><p class="pop-how"><span class="dicon"></span><span></span></p>';
+  document.body.appendChild(pop);
+  let popFrom = null;
+  const closePop = (refocus) => { if (pop.hidden) return; pop.hidden = true; if (refocus) popFrom?.focus(); popFrom = null; };
+  function openPop(tile, c, t, held, fromKeyboard) {
+    popFrom = tile;
+    pop.querySelector('.pop-cat').textContent = NAMES[c];
+    pop.querySelector('.pop-what').textContent = t;
+    const ic = pop.querySelector('.pop-how .dicon'); ic.className = 'dicon ' + (held ? 'held' : 'refused'); ic.innerHTML = held ? ICON.held : ICON.refused;
+    pop.querySelector('.pop-how span:last-child').textContent = held ? 'Stopped and handed to you for approval.' : 'Blocked or masked outright. The agent never got it.';
+    pop.setAttribute('aria-label', t);
+    pop.hidden = false;
+    const r = tile.getBoundingClientRect(), w = pop.offsetWidth, h = pop.offsetHeight, m = 12;
+    const left = Math.min(Math.max(m, r.left + r.width / 2 - w / 2), innerWidth - w - m);
+    const below = r.bottom + 10 + h < innerHeight - m;
+    pop.style.left = `${left + scrollX}px`;
+    pop.style.top = `${(below ? r.bottom + 10 : r.top - 10 - h) + scrollY}px`;
+    pop.style.setProperty('--tip', `${r.left + r.width / 2 - left}px`);
+    pop.dataset.side = below ? 'below' : 'above';
+    if (fromKeyboard) pop.querySelector('.pop-x').focus({ preventScroll: true });
+  }
+  pop.querySelector('.pop-x').addEventListener('click', () => closePop(true));
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closePop(true); });
+  document.addEventListener('pointerdown', e => { if (!pop.hidden && !pop.contains(e.target) && !e.target.closest('.cell')) closePop(false); });
+  addEventListener('resize', () => closePop(false));
   for (const [c, list] of Object.entries(groups)) {
     const box = document.createElement('div'); box.className = 'cat';
     box.innerHTML = `<h3><span>${NAMES[c]}</span><span>${list.length}/${list.length}</span></h3><div class="cells"></div>`;
@@ -624,7 +673,8 @@ footer a { color: var(--ink-2); }
         dWhat.textContent = t; dIcon.innerHTML = held ? ICON.held : ICON.refused; dIcon.className = 'dicon ' + (held ? 'held' : 'refused');
         dHow.textContent = `${NAMES[c]}. ${held ? 'Stopped and handed to you for approval.' : 'Refused or masked; the agent never got it.'}`;
       };
-      b.addEventListener('click', show); b.addEventListener('mouseenter', show); b.addEventListener('focus', show);
+      b.addEventListener('mouseenter', show); b.addEventListener('focus', show);
+      b.addEventListener('click', e => { show(); openPop(b, c, t, held, e.detail === 0); });
       cells.appendChild(b);
     });
     wall.appendChild(box);
