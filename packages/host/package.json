@@ -1,8 +1,8 @@
 {
   "name": "@anuraghq/mobius",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "Let AI agents use a real phone, safely. MCP server + its own fast device driver for Android, iPhones and iOS simulators: 75 tools, approvals, policy, masking, signed audit, performance and accessibility reports.",
-  "license": "Apache-2.0",
+  "license": "FSL-1.1-ALv2",
   "type": "module",
   "bin": {
     "mobius": "dist/cli.js"

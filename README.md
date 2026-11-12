@@ -500,7 +500,7 @@ See [Quick start](#quick-start) and [Configuration reference](#configuration-ref
 
 ## Agent plane
 
-Everything an operator needs to let agents loose on phones, in the open-source engine:
+Everything an operator needs to let agents loose on phones, in the Mobius engine:
 
 | | What it does |
 |---|---|
@@ -601,4 +601,11 @@ Related: **[mobius-qa](https://github.com/Anu-Code07/mobius-qa)**, an AI mobile 
 
 ## License
 
-Apache-2.0
+Mobius is **source-available** under the [Functional Source License, Version 1.1, ALv2 Future License](LICENSE) (FSL-1.1-ALv2).
+
+In plain English (the [LICENSE](LICENSE) file is what counts):
+- **You can** read, run, modify and use Mobius, including inside your company, for testing, QA, research and your own products.
+- **You can't** sell Mobius or offer it, or something substantially similar built from it, as a competing commercial product or service.
+- **Every release becomes Apache-2.0 two years after it ships.**
+
+Versions 0.1.0 to 0.1.4 were released under Apache-2.0 and stay under that licence. For a commercial licence, or to build a product on Mobius, get in touch through [GitHub](https://github.com/Anu-Code07).
