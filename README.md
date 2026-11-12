@@ -601,9 +601,18 @@ Related: **[mobius-qa](https://github.com/Anu-Code07/mobius-qa)**, an AI mobile 
 
 ## License
 
-Mobius is **source-available** under the [Functional Source License, Version 1.1, ALv2 Future License](LICENSE) (FSL-1.1-ALv2).
+Mobius is **source-available**: the engine is under the [Functional Source License, Version 1.1, ALv2 Future License](LICENSE) (FSL-1.1-ALv2), and the parts meant for everyone to adopt are Apache-2.0.
 
-In plain English (the [LICENSE](LICENSE) file is what counts):
+| Part | Licence |
+|---|---|
+| The engine: MCP server and safety layer ([`packages/host`](packages/host)), device driver ([`drivers/mobiusagent-driver`](drivers/mobiusagent-driver)), the npm package `@anuraghq/mobius` | [FSL-1.1-ALv2](LICENSE) |
+| The protocol: [Mobius Agent Safety Protocol spec and JSON Schemas](docs/spec) | [Apache-2.0](docs/spec/LICENSE) |
+| The benchmark: [Break Mobius](docs/benchmark) attack corpus and [harness](packages/host/bench) | [Apache-2.0](packages/host/bench/LICENSE) |
+| The app SDK: [`mobius_protect`](packages/mobius_protect) for declaring sensitive actions in Flutter apps | [Apache-2.0](packages/mobius_protect/LICENSE) |
+
+Implement the protocol in your own tools, score any agent-safety layer on Break Mobius, and tag your app's buttons with `mobius_protect`, all freely. Each Apache-2.0 folder has its own LICENSE file; everything else in the repository is FSL-1.1-ALv2.
+
+For the engine, in plain English (the [LICENSE](LICENSE) file is what counts):
 - **You can** read, run, modify and use Mobius, including inside your company, for testing, QA, research and your own products.
 - **You can't** sell Mobius or offer it, or something substantially similar built from it, as a competing commercial product or service.
 - **Every release becomes Apache-2.0 two years after it ships.**

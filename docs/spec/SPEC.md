@@ -107,3 +107,5 @@ These are deliberately out of scope for 0.1:
 - delegated approvals (who may approve what)
 - a shared revocation list across machines (0.1 revocation is per install)
 - a registry of declared actions per app
+
+> Licensed under Apache-2.0 (see [LICENSE](LICENSE)): implement it freely in any tool.

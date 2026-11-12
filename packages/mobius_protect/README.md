@@ -21,3 +21,7 @@ Actions: `payment · booking · send · delete · account · install · secret`.
 Not on Flutter? Set the same identifier yourself:
 - **Android:** a resource id like `mobius_payment_438_INR`.
 - **iOS:** `accessibilityIdentifier = "mobius:payment:438:INR"`.
+
+## License
+
+Apache-2.0 (see [LICENSE](LICENSE)).

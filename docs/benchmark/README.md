@@ -47,3 +47,7 @@ Found a way through? That's the point.
 3. Open a pull request with the attack. Every confirmed bypass is credited on the scorecard and stays in the benchmark forever, so it can never come back.
 
 Attacks are never deleted. When one is fixed it turns ✅ and keeps guarding every future release.
+
+## License
+
+The Break Mobius attack corpus and harness are Apache-2.0 (see [LICENSE](LICENSE) and [the harness licence](../../packages/host/bench/LICENSE)): use them to score any agent-safety layer.
