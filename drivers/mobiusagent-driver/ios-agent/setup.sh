@@ -15,12 +15,18 @@ cd "$DIR"
 # Mobius fast touch (tap/swipe without WebDriverAgent's app lookup and settle wait). BSD-3 allows shipping a modified build.
 PATCH="$HERE/wda-mobius-fast-touch.patch"
 git apply --check "$PATCH" 2>/dev/null && git apply "$PATCH" && echo "applied Mobius fast-touch patch"
-xcodebuild build-for-testing -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
+# Run xcodebuild into a log and stop on failure: piping it through grep would hide a failed build, and a stale
+# .xctestrun from an earlier build would then pass the final check.
+build() { # build <log name> <xcodebuild args...>
+  log="$DIR/$1.log"; shift
+  if xcodebuild "$@" >"$log" 2>&1; then grep -E "\*\* " "$log" || true; else grep -E "error:|\*\* " "$log"; echo "xcodebuild failed (full log: $log)" >&2; exit 1; fi
+}
+build build-device build-for-testing -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
   -destination 'generic/platform=iOS' DEVELOPMENT_TEAM="$TEAM" CODE_SIGN_STYLE=Automatic \
   PRODUCT_BUNDLE_IDENTIFIER="${MOBIUS_WDA_BUNDLE:-dev.mobius.wda}" \
-  -allowProvisioningUpdates -allowProvisioningDeviceRegistration -derivedDataPath "$DIR/build" | grep -E "error:|\*\* " || true
+  -allowProvisioningUpdates -allowProvisioningDeviceRegistration -derivedDataPath "$DIR/build"
 "$HERE/brand.sh"
 # Simulators: an unsigned simulator build (no team needed).
-xcodebuild build-for-testing -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
-  -destination 'generic/platform=iOS Simulator' -derivedDataPath "$DIR/build-sim" CODE_SIGNING_ALLOWED=NO | grep -E "error:|\*\* " || true
+build build-sim build-for-testing -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
+  -destination 'generic/platform=iOS Simulator' -derivedDataPath "$DIR/build-sim" CODE_SIGNING_ALLOWED=NO
 ls "$DIR"/build/Build/Products/*.xctestrun >/dev/null && echo "WebDriverAgent ready in $DIR"

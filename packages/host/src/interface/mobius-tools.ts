@@ -10,6 +10,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { MobiusError } from '../execution/connector.ts';
 import { scrub } from '../execution/observe.ts';
+import { center } from '../execution/session.ts';
+import type { Element, Observation } from '../core/protocol.ts';
 import type { Mobius } from '../infrastructure/registry.ts';
 
 type Handler = (a: any) => Promise<any>;
@@ -42,13 +44,16 @@ export function registerMobiusTools(server: McpServer, handlers: Map<string, Han
     if (aliases) server.registerTool(`mobile_${name}`, cfg, cb);
   };
 
-  /** "@e5" (short ref) → the id on the latest observation of that device. */
+  /**
+   * "@e5" (short ref) → the id on the observation the agent last saw (list_elements / snapshot), so a ref the agent
+   * read is resolved by identity (or refused as stale) after the screen moves, never re-pointed at whatever is e5 now.
+   */
   const elementId = async (dev: string, ref?: string) => {
     if (!ref) return undefined;
     if (!ref.startsWith('@')) return ref;
     const s = await mobius.session(dev);
-    const obs = s.store.latest() ?? await s.observe();
-    return `${obs.observation_id}:${ref.slice(1)}`;
+    const shown = s.shown ?? s.store.latest()?.observation_id ?? (await s.observe()).observation_id;
+    return `${shown}:${ref.slice(1)}`;
   };
 
   /** A driver operation beyond the core set, through the same pipeline (gate + audit) as every other action. */
@@ -169,6 +174,24 @@ export function registerMobiusTools(server: McpServer, handlers: Map<string, Han
     return exact ? hay.some(h => h === norm(q)) : hay.some(h => h.includes(norm(q)));
   };
 
+  /** Visibly tappable: on screen and not under a floating bar (the same rule the tap itself applies). */
+  const tappable = (e: Element, o: Observation) => { try { center(e, o.elements, o.screen); return true; } catch { return false; } };
+  /** Scroll until an element showing `text` is tappable, or the list stops moving. */
+  const scrollTo = async (device: string, text: string, direction: string, max: number) => {
+    const s = await mobius.session(device);
+    let prev = '';
+    for (let i = 0; i <= max; i++) {
+      const o = await s.observe();
+      const el = o.elements.find(e => matches(e, text, false) && tappable(e, o));
+      if (el) { s.shown = o.observation_id; return { ...el, swipes: i }; }
+      if (o.screen_hash === prev) return null; // end of the list
+      prev = o.screen_hash;
+      const r = await call('scroll', { device_id: device, direction });
+      if (r.isError) throw new MobiusError(JSON.parse(r.content[0].text).error?.code ?? 'INTERNAL', JSON.parse(r.content[0].text).message ?? 'scroll failed');
+    }
+    return null;
+  };
+
   tool('tap_text', 'Tap Text', 'Find the element showing this text (or accessibility label) on the current screen and tap it. Prefers buttons and clickable elements. Saves an observe + pick round-trip.',
     { device, text: z.string().min(1), exact: z.boolean().optional(), index: z.number().int().min(0).optional().describe('Which match, if several (default 0).') },
     async ({ device, text, exact, index }) => {
@@ -177,7 +200,13 @@ export function registerMobiusTools(server: McpServer, handlers: Map<string, Han
       const hits = o.elements.filter(e => matches(e, text, !!exact));
       const ranked = [...hits.filter(e => e.clickable || e.role === 'button'), ...hits.filter(e => !(e.clickable || e.role === 'button'))];
       const el = ranked[index ?? 0];
-      if (el) return call('tap', { device_id: device, element_id: el.id });
+      if (el && tappable(el, o)) return call('tap', { device_id: device, element_id: el.id });
+      if (el) {
+        // On screen in the tree but off its edge or under a floating bar: bring it into view, then tap the fresh match.
+        const found = await scrollTo(device, text, el.bounds.y > o.screen.height / 2 ? 'down' : 'up', 5);
+        if (found) return call('tap', { device_id: device, element_id: found.id });
+        throw new MobiusError('ELEMENT_NOT_FOUND', `"${text}" is on this screen but covered or off its edge, and scrolling did not reveal it`, { hint: 'Scroll manually, observe, then tap.' });
+      }
       // Not in the accessibility tree: read what's drawn on screen (OCR) and tap it by position. Coordinate taps go
       // through the same gate (and count as unidentified targets where policy asks).
       const ocr = s.connector.extra ? await s.connector.extra('ocr', {}).catch(() => null) : null;
@@ -190,17 +219,8 @@ export function registerMobiusTools(server: McpServer, handlers: Map<string, Han
   tool('scroll_until_visible', 'Scroll Until Visible', 'Scroll until an element showing this text is on screen (or the list stops moving). Returns its ref.',
     { device, text: z.string().min(1), direction: z.enum(['up', 'down', 'left', 'right']).optional(), max_swipes: z.number().int().min(1).max(30).optional() },
     async ({ device, text, direction, max_swipes }) => {
-      const s = await mobius.session(device);
-      let prev = '';
-      for (let i = 0; i <= (max_swipes ?? 10); i++) {
-        const o = await s.observe();
-        const el = o.elements.find(e => matches(e, text, false) && e.bounds.width > 0 && e.bounds.y >= 0 && e.bounds.y + e.bounds.height <= o.screen.height);
-        if (el) return json({ found: true, ref: el.id, swipes: i, element: { role: el.role, text: el.text, label: el.label, box: [el.bounds.x, el.bounds.y, el.bounds.width, el.bounds.height] } });
-        if (o.screen_hash === prev) break; // end of the list
-        prev = o.screen_hash;
-        const r = await call('scroll', { device_id: device, direction: direction ?? 'down' });
-        if (r.isError) return r;
-      }
+      const el = await scrollTo(device, text, direction ?? 'down', max_swipes ?? 10);
+      if (el) return json({ found: true, ref: el.id, swipes: el.swipes, element: { role: el.role, text: el.text, label: el.label, box: [el.bounds.x, el.bounds.y, el.bounds.width, el.bounds.height] } });
       return json({ found: false, hint: `"${text}" did not appear; try the other direction or check the screen.` });
     }, true);
 
@@ -267,7 +287,19 @@ export function registerMobiusTools(server: McpServer, handlers: Map<string, Han
     'perf_report', a => ({ app: a.packageName, seconds: a.seconds ?? 30, ...(a.budget ? { budget: a.budget } : {}), ...(a.output ? { output: a.output } : {}) }), { mutating: true, app: a => a.packageName });
   drv('accessibility_audit', 'Accessibility Audit', 'Audit the current screen: unlabeled controls, touch targets below 44pt/48dp, duplicate labels, with a score.', {}, 'a11y_audit', () => ({}), { readOnly: true, scrub: true });
   drv('screen_diff', 'Screen Diff', 'What changed on screen since the last snapshot or diff (added/removed elements). Read the change, not the whole tree.', {}, 'diff', () => ({}), { readOnly: true, scrub: true });
-  drv('snapshot', 'Text Snapshot', 'The screen as compact text, one element per line with refs (@e5) usable by click tools.', {}, 'snapshot', () => ({}), { readOnly: true, scrub: true });
+  tool('snapshot', 'Text Snapshot', 'The screen as compact text, one element per line with refs (@e5) usable by click tools.', { device },
+    async ({ device }) => {
+      const s = await mobius.session(device);
+      const o = await s.observe();
+      s.shown = o.observation_id;
+      const lines = o.elements.map(e => {
+        const words = [e.text, e.label && e.label !== e.text ? e.label : ''].filter(Boolean).map(t => JSON.stringify(t)).join(' ');
+        const rid = e.resource_id ? ` #${e.resource_id.replace(/^[\w.]+:id\//, '')}` : '';
+        const flags = [e.clickable && 'clickable', e.editable && 'editable', e.scrollable && 'scrollable', !e.enabled && 'disabled', e.focused && 'focused', e.sensitive && 'sensitive'].filter(Boolean);
+        return `@${e.id.split(':')[1]} [${e.role}] ${words}${rid}${flags.length ? ` (${flags.join(', ')})` : ''}`.replace(/  +/g, ' ');
+      });
+      return json({ app: o.foreground_app, observation_id: o.observation_id, snapshot: lines.join('\n') });
+    }, true);
   drv('wait_until_idle', 'Wait Until Idle', 'Wait until the screen stops changing.', { timeout_ms: z.number().int().min(200).max(60_000).optional() }, 'wait_idle', a => ({ timeout_ms: a.timeout_ms ?? 5000 }), { readOnly: true });
   drv('read_screen_text', 'Read Screen Text (OCR)', 'Every piece of text drawn on screen with its box, including unlabeled buttons and images. Secrets are masked.', {}, 'ocr', () => ({}), { readOnly: true, scrub: true });
 
@@ -296,7 +328,8 @@ export function registerMobiusTools(server: McpServer, handlers: Map<string, Han
     async a => {
       const s = await mobius.session(a.device);
       if ((await s.observe()).elements.some(e => e.sensitive)) throw new MobiusError('POLICY_BLOCKED', 'A password, PIN, OTP or card number is on screen, so no screenshot was taken');
-      const { data } = await extra(a.device, 'element_screenshot', 'element_screenshot', { ref: a.ref }, { mutating: false, describe: 'Element screenshot' });
+      const el = s.store.resolve((await elementId(a.device, a.ref))!);
+      const { data } = await extra(a.device, 'element_screenshot', 'element_screenshot', { box: [el.bounds.x, el.bounds.y, el.bounds.width, el.bounds.height] }, { mutating: false, describe: 'Element screenshot' });
       return { content: [{ type: 'image' as const, data: data.data, mimeType: data.mimeType }] };
     }, true);
 

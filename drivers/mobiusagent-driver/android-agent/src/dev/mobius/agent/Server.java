@@ -52,38 +52,53 @@ public final class Server {
 
         LocalServerSocket server = new LocalServerSocket(SOCKET);
         System.out.println("mobius-agent ready");
+        // One thread per client: a second process (CLI next to a long-lived server) must not wait on the first one's
+        // open connection. Commands share one UiAutomation, so they run one at a time; ping answers without the lock.
+        final Object lock = new Object();
         while (true) {
-            try (LocalSocket s = server.accept()) {
-                BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
-                OutputStream out = s.getOutputStream();
-                String line;
-                while ((line = in.readLine()) != null) {
-                    String resp;
-                    try {
-                        String cmd = line.trim();
-                        resp = "ping".equals(cmd) ? "pong " + version
-                                : "dump".equals(cmd) ? dump(ua).toString()
-                                : cmd.startsWith("text ") ? setText(ua, b64(cmd.substring(5)), false).toString()
-                                : cmd.startsWith("fill ") ? setText(ua, b64(cmd.substring(5)), true).toString()
-                                : "fill".equals(cmd) ? setText(ua, "", true).toString()
-                                : cmd.startsWith("shot ") ? shot(ua, Integer.parseInt(cmd.substring(5).trim())).toString()
-                                : "clip_get".equals(cmd) ? clipGet().toString()
-                                : cmd.startsWith("clip_set ") ? clipSet(b64(cmd.substring(9))).toString()
-                                : cmd.startsWith("pinch ") ? pinch(ua, cmd.substring(6).trim().split(" ")).toString()
-                                : cmd.startsWith("tap ") ? tap(ua, cmd.substring(4).trim().split(" ")).toString()
-                                : cmd.startsWith("swipe ") ? swipe(ua, cmd.substring(6).trim().split(" ")).toString()
-                                : cmd.startsWith("keys ") ? keys(ua, b64(cmd.substring(5))).toString()
-                                : cmd.startsWith("key ") ? key(ua, Integer.parseInt(cmd.substring(4).trim())).toString()
-                                : "{\"error\":\"unknown command\"}";
-                    } catch (Throwable t) {
-                        resp = new JSONObject().put("error", String.valueOf(t)).toString();
-                    }
-                    out.write((resp + "\n").getBytes(StandardCharsets.UTF_8));
-                    out.flush();
-                }
-            } catch (Throwable ignored) {
-                // client went away; wait for the next one
+            final LocalSocket s = server.accept();
+            Thread t = new Thread(() -> serve(s, ua, lock), "mobius-client");
+            t.setDaemon(true);
+            t.start();
+        }
+    }
+
+    static void serve(LocalSocket s, UiAutomation ua, Object lock) {
+        try (LocalSocket sock = s) {
+            BufferedReader in = new BufferedReader(new InputStreamReader(sock.getInputStream(), StandardCharsets.UTF_8));
+            OutputStream out = sock.getOutputStream();
+            String line;
+            while ((line = in.readLine()) != null) {
+                String cmd = line.trim();
+                String resp;
+                if ("ping".equals(cmd)) resp = "pong " + version;
+                else synchronized (lock) { resp = handle(ua, cmd); }
+                out.write((resp + "\n").getBytes(StandardCharsets.UTF_8));
+                out.flush();
             }
+        } catch (Throwable ignored) {
+            // client went away
+        }
+    }
+
+    static String handle(UiAutomation ua, String cmd) {
+        try {
+            return "dump".equals(cmd) ? dump(ua).toString()
+                    : cmd.startsWith("text ") ? setText(ua, b64(cmd.substring(5)), false).toString()
+                    : cmd.startsWith("fill ") ? setText(ua, b64(cmd.substring(5)), true).toString()
+                    : "fill".equals(cmd) ? setText(ua, "", true).toString()
+                    : cmd.startsWith("shot ") ? shot(ua, Integer.parseInt(cmd.substring(5).trim())).toString()
+                    : "clip_get".equals(cmd) ? clipGet().toString()
+                    : cmd.startsWith("clip_set ") ? clipSet(b64(cmd.substring(9))).toString()
+                    : cmd.startsWith("pinch ") ? pinch(ua, cmd.substring(6).trim().split(" ")).toString()
+                    : cmd.startsWith("tap ") ? tap(ua, cmd.substring(4).trim().split(" ")).toString()
+                    : cmd.startsWith("swipe ") ? swipe(ua, cmd.substring(6).trim().split(" ")).toString()
+                    : cmd.startsWith("keys ") ? keys(ua, b64(cmd.substring(5))).toString()
+                    : cmd.startsWith("key ") ? key(ua, Integer.parseInt(cmd.substring(4).trim())).toString()
+                    : "{\"error\":\"unknown command\"}";
+        } catch (Throwable t) {
+            try { return new JSONObject().put("error", String.valueOf(t)).toString(); }
+            catch (Exception e) { return "{\"error\":\"internal\"}"; }
         }
     }
 

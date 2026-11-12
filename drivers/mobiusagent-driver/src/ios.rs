@@ -14,6 +14,17 @@ use std::time::{Duration, Instant};
 
 type R<T> = Result<T, String>;
 const WDA_PORT: u16 = 8100;
+const MJPEG_PORT: u16 = 9100;
+
+/// Simulators share the Mac's network, so each needs its own WebDriverAgent port: with one shared 8100, the second
+/// simulator's commands silently drive the first. Real iPhones keep the defaults (ports on the phone, via usbmuxd).
+/// ponytail: port from a hash of the UDID, 1-in-800 collision between two booted simulators; a port registry if that bites.
+fn sim_offset(udid: &str) -> u16 {
+    if !is_sim(udid) { return 0; }
+    1 + (udid.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3)) % 800) as u16
+}
+fn wda_port(udid: &str) -> u16 { WDA_PORT + sim_offset(udid) }
+fn mjpeg_port(udid: &str) -> u16 { MJPEG_PORT + sim_offset(udid) }
 
 /// iOS simulator ids are UUIDs: 8-4-4-4-12 hex.
 pub fn is_sim(id: &str) -> bool {
@@ -22,8 +33,9 @@ pub fn is_sim(id: &str) -> bool {
 /// Any iOS target (real iPhone or simulator).
 pub fn is_ios(id: &str) -> bool { is_udid(id) || is_sim(id) }
 
-trait Stream: Read + Write {}
-impl<T: Read + Write> Stream for T {}
+trait Stream: Read + Write { fn timeout(&self, d: Duration); }
+impl Stream for std::net::TcpStream { fn timeout(&self, d: Duration) { self.set_read_timeout(Some(d)).ok(); } }
+impl Stream for UnixStream { fn timeout(&self, d: Duration) { self.set_read_timeout(Some(d)).ok(); } }
 
 /// A TCP stream to `port` on the phone: through usbmuxd for real iPhones, plain localhost for simulators.
 fn connect(udid: &str, port: u16) -> R<Box<dyn Stream>> {
@@ -119,7 +131,7 @@ fn mux_connect_id(udid: &str, port: u16, id: u64) -> R<UnixStream> {
 // ---------- HTTP/1.1 over the tunnel (one request per connection) ----------
 
 fn http(udid: &str, method: &str, path: &str, body: Option<&Value>) -> R<Value> {
-    let mut s = connect(udid, WDA_PORT)?;
+    let mut s = connect(udid, wda_port(udid))?;
     let b = body.filter(|b| !b.is_null()).map(|b| b.to_string()).unwrap_or_default();
     let req = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}", b.len());
     s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
@@ -151,6 +163,20 @@ fn dechunk(mut b: &[u8]) -> Vec<u8> {
 // ---------- WebDriverAgent lifecycle ----------
 
 static RUNNERS: Mutex<Option<HashMap<String, Child>>> = Mutex::new(None);
+/// Background children this process spawned (recorders, WDA hosts): kept so their exit is reaped, not left a zombie.
+static CHILDREN: Mutex<Option<HashMap<u32, Child>>> = Mutex::new(None);
+fn keep(c: Child) -> u32 { let pid = c.id(); CHILDREN.lock().unwrap().get_or_insert_with(HashMap::new).insert(pid, c); pid }
+/// Whether `pid` has exited: reaped through try_wait when we spawned it here, else `kill -0` (spawned by another CLI run).
+fn exited(pid: u32) -> bool {
+    let mut g = CHILDREN.lock().unwrap();
+    let m = g.get_or_insert_with(HashMap::new);
+    if let Some(c) = m.get_mut(&pid) {
+        let done = !matches!(c.try_wait(), Ok(None));
+        if done { m.remove(&pid); }
+        return done;
+    }
+    Command::new("kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().map(|s| !s.success()).unwrap_or(true)
+}
 static SESSIONS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 fn wda_home() -> std::path::PathBuf {
@@ -209,6 +235,7 @@ fn ensure_wda(udid: &str) -> R<Value> {
         // Exact destination (no "multiple matching destinations" probing); skip diagnostics and timeouts we never use.
         .args(["test-without-building", "-xctestrun", xctestrun.to_str().unwrap(), "-destination", &if is_sim(udid) { format!("id={udid}") } else { format!("platform=iOS,arch=arm64,id={udid}") },
             "-test-timeouts-enabled", "NO", "-collect-test-diagnostics", "never", "-disable-concurrent-destination-testing"])
+        .env("TEST_RUNNER_USE_PORT", wda_port(udid).to_string()).env("TEST_RUNNER_MJPEG_SERVER_PORT", mjpeg_port(udid).to_string())
         .stdout(Stdio::from(log.try_clone().unwrap())).stderr(Stdio::from(log)).spawn()
         .map_err(|e| format!("xcodebuild: {e}"))?;
     RUNNERS.lock().unwrap().get_or_insert_with(HashMap::new).insert(udid.to_string(), child);
@@ -232,7 +259,7 @@ fn start_direct(udid: &str) -> R<Value> {
     let until = Instant::now() + Duration::from_secs(45);
     while Instant::now() < until {
         std::thread::sleep(Duration::from_millis(100));
-        if let Ok(v) = http(udid, "GET", "/status", None) { return Ok(v); }
+        if let Ok(v) = http(udid, "GET", "/status", None) { keep(child); return Ok(v); }
         if let Ok(Some(_)) = child.try_wait() { return Err("direct WebDriverAgent start failed (see host log)".into()); }
     }
     let _ = child.kill();
@@ -600,7 +627,7 @@ pub fn handle(op: &str, udid: &str, req: &Value, max_jpeg: impl Fn(&[u8], u32) -
             let log = std::fs::File::create(wda_home().join(format!("record-{udid}.log"))).map_err(|e| e.to_string())?;
             let child = Command::new(exe).args(["__record", udid, &output, &req["time_limit"].as_u64().unwrap_or(180).min(1800).to_string()])
                 .stdin(Stdio::null()).stdout(Stdio::from(log.try_clone().unwrap())).stderr(Stdio::from(log)).process_group(0).spawn().map_err(|e| e.to_string())?;
-            std::fs::write(wda_home().join(format!("record-{udid}.json")), json!({ "pid": child.id(), "output": output, "started": now_ms() }).to_string()).map_err(|e| e.to_string())?;
+            std::fs::write(wda_home().join(format!("record-{udid}.json")), json!({ "pid": keep(child), "output": output, "started": now_ms() }).to_string()).map_err(|e| e.to_string())?;
             Ok(json!({ "recording": true, "output": output }))
         }
         "record_stop" => {
@@ -608,7 +635,7 @@ pub fn handle(op: &str, udid: &str, req: &Value, max_jpeg: impl Fn(&[u8], u32) -
             std::fs::write(wda_home().join(format!("record-{udid}.stop")), b"").map_err(|e| e.to_string())?;
             let pid = meta["pid"].as_u64().unwrap_or(0);
             for _ in 0..100 { // the recorder finalizes the MP4, then exits
-                if Command::new("kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().map(|s| !s.success()).unwrap_or(true) { break; }
+                if exited(pid as u32) { break; }
                 std::thread::sleep(Duration::from_millis(100));
             }
             let _ = std::fs::remove_file(wda_home().join(format!("record-{udid}.json")));
@@ -662,7 +689,8 @@ async fn provider(udid: &str) -> R<std::sync::Arc<idevice::provider::UsbmuxdProv
 /// stop file appears or the time limit passes, then the MP4 is finalized.
 pub fn record(udid: &str, output: &str, limit_s: u64) -> i32 {
     let stop = wda_home().join(format!("record-{udid}.stop"));
-    let mut s = match connect(udid, 9100) { Ok(s) => s, Err(e) => { eprintln!("{e}"); return 1 } };
+    let mut s = match connect(udid, mjpeg_port(udid)) { Ok(s) => s, Err(e) => { eprintln!("{e}"); return 1 } };
+    s.timeout(Duration::from_millis(500)); // see the stop file within half a second even when frames pause
     let _ = s.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     let mut ff = match Command::new("ffmpeg").args(["-loglevel", "error", "-y", "-use_wallclock_as_timestamps", "1", "-f", "mpjpeg", "-i", "-",
         "-fps_mode", "cfr", "-r", "15", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
@@ -900,14 +928,14 @@ fn sim_op(op: &str, sim: &str, req: &Value) -> Option<R<Value>> {
             let child = Command::new("xcrun").args(["simctl", "io", sim, "recordVideo", "--codec", "h264", "--force", &output])
                 .stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn().map_err(|e| e.to_string())?;
             std::fs::create_dir_all(wda_home()).ok();
-            std::fs::write(wda_home().join(format!("record-{sim}.json")), json!({ "pid": child.id(), "output": output, "started": now_ms() }).to_string()).map_err(|e| e.to_string())?;
+            std::fs::write(wda_home().join(format!("record-{sim}.json")), json!({ "pid": keep(child), "output": output, "started": now_ms() }).to_string()).map_err(|e| e.to_string())?;
             Ok(json!({ "recording": true, "output": output }))
         })(),
         "record_stop" => (|| {
             let meta: Value = std::fs::read(wda_home().join(format!("record-{sim}.json"))).ok().and_then(|b| serde_json::from_slice(&b).ok()).ok_or("no recording in progress")?;
             let pid = meta["pid"].as_u64().unwrap_or(0).to_string();
             let _ = Command::new("kill").args(["-INT", &pid]).status();
-            for _ in 0..100 { if Command::new("kill").args(["-0", &pid]).stderr(Stdio::null()).status().map(|s| !s.success()).unwrap_or(true) { break; } std::thread::sleep(Duration::from_millis(100)); }
+            for _ in 0..100 { if exited(pid.parse().unwrap_or(0)) { break; } std::thread::sleep(Duration::from_millis(100)); }
             let _ = std::fs::remove_file(wda_home().join(format!("record-{sim}.json")));
             let out = meta["output"].as_str().unwrap_or("").to_string();
             let output = req["output"].as_str().map(String::from).unwrap_or(out.clone());

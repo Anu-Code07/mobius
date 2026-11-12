@@ -164,6 +164,24 @@ fn cache_set(dev: &str, k: &str, v: Value) {
     let _ = std::fs::write(p, c.to_string());
 }
 
+/// A host port forwarded to `remote` on `dev`. Reuses the cached forward while adb still lists it; otherwise removes
+/// this device's stale forwards to `remote` before making a new one, so reconnects never pile up host ports.
+fn forward(dev: &str, remote: &str, key: &str) -> R<u16> {
+    let list = String::from_utf8_lossy(&adb(&["forward", "--list"])?).into_owned();
+    let ours: Vec<u16> = list.lines().filter_map(|l| {
+        let mut f = l.split_whitespace();
+        let (d, local, r) = (f.next()?, f.next()?, f.next()?);
+        if d == dev && r == remote { local.strip_prefix("tcp:")?.parse().ok() } else { None }
+    }).collect();
+    let keep = cache_get(dev)[key].as_u64().map(|p| p as u16).filter(|p| ours.contains(p));
+    for p in ours.iter().filter(|p| Some(**p) != keep) { let _ = adb(&["-s", dev, "forward", "--remove", &format!("tcp:{p}")]); }
+    if let Some(p) = keep { return Ok(p); }
+    let out = String::from_utf8_lossy(&adb(&["-s", dev, "forward", "tcp:0", remote])?).trim().to_string();
+    let port = out.parse::<u16>().map_err(|_| format!("bad forward port {out}"))?;
+    cache_set(dev, key, json!(port));
+    Ok(port)
+}
+
 /// Start (or reuse) the helper on `dev` and return a connection to it.
 fn agent_conn(dev: &str, fast: bool) -> R<BufReader<TcpStream>> {
     // The helper echoes the build hash it was started with, so an older copy left running on the phone gets replaced.
@@ -180,12 +198,7 @@ fn agent_conn(dev: &str, fast: bool) -> R<BufReader<TcpStream>> {
         s.set_nodelay(true).ok();
         Ok(BufReader::new(s))
     };
-    let connect = || -> R<BufReader<TcpStream>> {
-        let port = String::from_utf8_lossy(&adb(&["-s", dev, "forward", "tcp:0", "localabstract:mobius-agent"])?).trim().to_string();
-        let port = port.parse::<u16>().map_err(|_| format!("bad forward port {port}"))?;
-        cache_set(dev, "agent_port", json!(port));
-        open(port)
-    };
+    let connect = || -> R<BufReader<TcpStream>> { open(forward(dev, "localabstract:mobius-agent", "agent_port")?) };
     // Fast path for a fresh process: the forward from last time is usually still there. No ping: if the helper behind it
     // is gone or outdated, the first command fails and agent_call reconnects through the checked path below.
     if fast && cache_get(dev)["agent_version"].as_str() == Some(version.as_str()) {
@@ -209,22 +222,52 @@ fn agent_conn(dev: &str, fast: bool) -> R<BufReader<TcpStream>> {
     Err(format!("helper did not start: {}", shell(dev, "cat /data/local/tmp/mobius-agent.log").unwrap_or_default().trim()))
 }
 
-/// One request to the helper on `dev` (started on first use; a broken connection is dropped and rebuilt next time).
+/// Prefix of an error after which a command may or may not have run on the device (the reply timed out).
+/// Gestures and typing are never re-sent or retried through a fallback after it: a second swipe or tap is a new action.
+const OUTCOME_UNKNOWN: &str = "outcome unknown: ";
+/// Whether an agent_call error means the command did not run, so a fallback (shell input, uiautomator) is safe.
+fn not_run(e: &str) -> bool { !e.starts_with(OUTCOME_UNKNOWN) }
+
+/// A helper reply saying it doesn't know the command (an older helper build). Parsed, not searched: dump replies
+/// carry every piece of screen text, and a screen showing "unknown command" must not look like an old helper.
+fn unknown_command(line: &str) -> bool {
+    serde_json::from_str::<Value>(line).ok().is_some_and(|v| v["error"] == "unknown command")
+}
+
+/// How long to wait for the helper's reply: gestures take their own duration on top (`swipe … ms`, `pinch … ms`, `tap x y hold`).
+fn reply_timeout(cmd: &str) -> std::time::Duration {
+    let last = cmd.rsplit(' ').next().and_then(|t| t.parse::<u64>().ok()).unwrap_or(0);
+    let gesture = if ["swipe ", "pinch ", "tap "].iter().any(|p| cmd.starts_with(p)) { last.min(600_000) }
+        else if cmd.starts_with("keys ") || cmd.starts_with("text ") { cmd.len() as u64 * 20 } // ~one key event per base64 char, generous
+        else { 0 };
+    std::time::Duration::from_millis(10_000 + gesture)
+}
+
+/// One request to the helper on `dev` (started on first use; a broken connection is dropped and rebuilt).
+/// Retried once on a fresh connection only when the command can't have run (write failed, connection closed with no
+/// reply, old helper); a reply timeout returns OUTCOME_UNKNOWN instead, so a slow gesture is never sent twice.
 fn agent_call(dev: &str, cmd: &str) -> R<Value> {
     let mut guard = AGENTS.lock().unwrap();
     let agents = guard.get_or_insert_with(HashMap::new);
-    let send = |conn: &mut BufReader<TcpStream>| -> R<String> {
-        conn.get_mut().write_all(format!("{cmd}\n").as_bytes()).map_err(|e| e.to_string())?;
+    // Err((reason, may_have_run))
+    let send = |conn: &mut BufReader<TcpStream>| -> Result<String, (String, bool)> {
+        conn.get_mut().set_read_timeout(Some(reply_timeout(cmd))).ok();
+        conn.get_mut().write_all(format!("{cmd}\n").as_bytes()).map_err(|e| (e.to_string(), false))?;
         let mut line = String::new();
-        conn.read_line(&mut line).map_err(|e| e.to_string())?;
-        if line.trim().is_empty() || line.contains("unknown command") { return Err("helper missing or outdated".into()); }
+        match conn.read_line(&mut line) {
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return Err((format!("{OUTCOME_UNKNOWN}helper did not reply to `{}`", cmd.split(' ').next().unwrap_or(cmd)), true)),
+            Err(e) => return Err((e.to_string(), false)),
+            Ok(_) => {}
+        }
+        if line.trim().is_empty() || unknown_command(&line) { return Err(("helper missing or outdated".into(), false)); }
         Ok(line)
     };
-    let (mut conn, line) = match agents.remove(dev).map(Ok).unwrap_or_else(|| agent_conn(dev, true)) {
-        Ok(mut c) => match send(&mut c) { Ok(l) => (c, l), Err(_) => { let mut c = agent_conn(dev, false)?; let l = send(&mut c)?; (c, l) } },
-        Err(_) => { let mut c = agent_conn(dev, false)?; let l = send(&mut c)?; (c, l) }
+    let first = agents.remove(dev).map(Ok).unwrap_or_else(|| agent_conn(dev, true));
+    let (conn, line) = match first.map_err(|e| (e, false)).and_then(|mut c| send(&mut c).map(|l| (c, l))) {
+        Ok(r) => r,
+        Err((e, true)) => return Err(e), // connection dropped with it: its late reply must not answer the next command
+        Err(_) => { let mut c = agent_conn(dev, false)?; let l = send(&mut c).map_err(|(e, _)| e)?; (c, l) }
     };
-    let _ = &mut conn;
     agents.insert(dev.to_string(), conn);
     let v: Value = serde_json::from_str(&line).map_err(|e| format!("helper reply: {e}"))?;
     if let Some(e) = v.get("error") { return Err(format!("helper: {}", e.as_str().unwrap_or("error"))); }
@@ -244,6 +287,14 @@ fn mask_codes(s: &str) -> String {
     }
     out.pop();
     out
+}
+
+/// Center of the visible part of a box [x, y, w, h] on a sw × sh screen: a tap on a partly off-screen element
+/// (carousel item, half-scrolled row) lands on what can actually be touched.
+fn visible_center(x: f64, y: f64, w: f64, h: f64, sw: f64, sh: f64) -> (f64, f64) {
+    let (x0, x1) = (x.max(0.0), (x + w).min(sw));
+    let (y0, y1) = (y.max(0.0), (y + h).min(sh));
+    ((x0 + x1.max(x0)) / 2.0, (y0 + y1.max(y0)) / 2.0)
 }
 
 fn now_ms() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0) }
@@ -308,7 +359,13 @@ fn input_text(dev: &str, text: &str) -> R<()> {
     }
     let flat = text.split('\n').collect::<Vec<_>>().join(" ");
     // The same key events `input text` sends, injected by the helper (no shell process per call).
-    if helper_ok() && agent_call(dev, &format!("keys {}", base64::engine::general_purpose::STANDARD.encode(&flat))).is_ok() { return Ok(()); }
+    if helper_ok() {
+        match agent_call(dev, &format!("keys {}", base64::engine::general_purpose::STANDARD.encode(&flat))) {
+            Ok(_) => return Ok(()),
+            Err(e) if !not_run(&e) => return Err(e), // some keys may be in the field: retyping would double them
+            Err(_) => {}
+        }
+    }
     for chunk in flat.as_bytes().chunks(200) {
         let s = std::str::from_utf8(chunk).unwrap().replace(' ', "%s");
         shell(dev, &format!("input text {}", q(&s)))?;
@@ -425,7 +482,7 @@ fn tap_text(dev: &str, req: &Value) -> R<Value> {
     let mut hits: Vec<_> = elements(&d).into_iter().filter(|e| e.5 > 0.0 && e.6 > 0.0 && e.3 < sw && e.4 < sh && e.3 + e.5 > 0.0 && e.4 + e.6 > 0.0 && m(&e.1)).collect();
     hits.sort_by_key(|e| !e.2); // clickable first
     if let Some(e) = hits.get(idx) {
-        let (x, y) = (e.3.max(0.0) + e.5.min(sw) / 2.0, e.4.max(0.0) + e.6.min(sh) / 2.0);
+        let (x, y) = visible_center(e.3, e.4, e.5, e.6, sw, sh);
         handle(&json!({ "op": "tap", "device": dev, "x": x, "y": y }))?;
         return Ok(json!({ "tapped": e.1, "via": "accessibility", "x": x.round(), "y": y.round() }));
     }
@@ -486,15 +543,13 @@ fn watch_crashes(dev: &str, req: &Value) -> R<Value> {
     };
     let seen = ids();
     let t = std::time::Instant::now();
-    let mut reports = vec![];
     while t.elapsed().as_secs() < secs {
         std::thread::sleep(std::time::Duration::from_secs(2));
-        for id in ids().difference(&seen).cloned().collect::<Vec<_>>() {
+        if let Some(id) = ids().difference(&seen).next().cloned() {
             let out = format!("{}/crash-{}.html", dir.trim_end_matches('/'), now_ms());
             let r = bug_report(dev, &json!({ "app": app, "output": out, "title": format!("Crash: {id}") }))?;
             eprintln!("mobiusagent-driver: crash detected ({id}) → {}", r["saved"]);
-            reports.push(json!({ "crash": id, "report": r["saved"] }));
-            return Ok(json!({ "crashed": true, "reports": reports, "after_s": t.elapsed().as_secs() }));
+            return Ok(json!({ "crashed": true, "reports": [{ "crash": id, "report": r["saved"] }], "after_s": t.elapsed().as_secs() }));
         }
     }
     Ok(json!({ "crashed": false, "watched_s": secs }))
@@ -525,10 +580,7 @@ fn replay(dev: &str, req: &Value) -> R<Value> {
 
 fn devtools_port(dev: &str, sock: &str) -> R<u16> {
     let key = format!("devtools_{sock}");
-    if let Some(p) = cache_get(dev)[&key].as_u64() { if http_get_json(p as u16, "/json/version").is_ok() { return Ok(p as u16); } }
-    let port = String::from_utf8_lossy(&adb(&["-s", dev, "forward", "tcp:0", &format!("localabstract:{sock}")])?).trim().parse::<u16>().map_err(|_| "forward failed")?;
-    cache_set(dev, &key, json!(port));
-    Ok(port)
+    forward(dev, &format!("localabstract:{sock}"), &key)
 }
 
 fn http_get_json(port: u16, path: &str) -> R<Value> {
@@ -548,6 +600,8 @@ fn b64d(s: &str) -> Vec<u8> { base64::engine::general_purpose::STANDARD.decode(s
 fn screen_image(dev: &str) -> R<(image::DynamicImage, f64)> {
     let shot = handle(&json!({ "op": "screenshot", "device": dev, "max": 0 }))?;
     let img = image::load_from_memory(&b64d(shot["data"].as_str().unwrap_or(""))).map_err(|e| format!("screenshot: {e}"))?;
+    // Android trees are in screenshot pixels in any rotation (`size` is the natural, portrait size: wrong in landscape).
+    if !ios::is_ios(dev) { return Ok((img, 1.0)); }
     let w = handle(&json!({ "op": "size", "device": dev }))?["width"].as_f64().unwrap_or(img.width() as f64);
     Ok((img.clone(), img.width() as f64 / w.max(1.0)))
 }
@@ -690,7 +744,7 @@ fn android_perf(dev: &str, req: &Value, secs: u64) -> R<(Value, Vec<report::Samp
     let before = crash_ids(dev);
     // Launch: cold (process killed) then warm (app backgrounded, process alive). `am start -W` reports TotalTime.
     let launch = |extra: &str| -> Option<u64> {
-        shell(dev, &format!("{extra}am start -W -n {comp}")).ok()?.lines().find_map(|l| l.trim().strip_prefix("TotalTime:").and_then(|v| v.trim().parse().ok()))
+        shell(dev, &format!("{extra}am start -W -n {}", q(&comp))).ok()?.lines().find_map(|l| l.trim().strip_prefix("TotalTime:").and_then(|v| v.trim().parse().ok()))
     };
     let cold = launch(&format!("am force-stop {app}; sleep 1; "));
     std::thread::sleep(std::time::Duration::from_millis(1500));
@@ -730,7 +784,7 @@ fn android_perf(dev: &str, req: &Value, secs: u64) -> R<(Value, Vec<report::Samp
     let gfx = shell(dev, &format!("dumpsys gfxinfo {app}")).unwrap_or_default();
     let grab = |k: &str| gfx.lines().find(|l| l.trim_start().starts_with(k)).map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string());
     let num = |s: Option<String>| s.and_then(|v| v.split(|c: char| !c.is_ascii_digit() && c != '.').find(|t| !t.is_empty()).and_then(|t| t.parse::<f64>().ok()));
-    let janky_pct = grab("Janky frames").and_then(|v| v.split('(').nth(1).and_then(|p| p.trim_end_matches(|c| c == ')' || c == '%').trim_end_matches('%').parse::<f64>().ok()));
+    let janky_pct = grab("Janky frames").and_then(|v| v.split('(').nth(1).and_then(|p| p.trim_end_matches([')', '%']).trim_end_matches('%').parse::<f64>().ok()));
     let pss = shell(dev, &format!("dumpsys meminfo {app}")).unwrap_or_default().lines().find(|l| l.trim_start().starts_with("TOTAL"))
         .and_then(|l| l.split_whitespace().find_map(|t| t.parse::<f64>().ok())).map(|k| report::r1(k / 1024.0));
     let bat1 = battery_at(dev);
@@ -763,7 +817,7 @@ fn elements(d: &Value) -> Vec<(String, String, bool, f64, f64, f64, f64)> {
             else { let r = &n["rect"]; (r["x"].as_f64().unwrap_or(0.0), r["y"].as_f64().unwrap_or(0.0), r["width"].as_f64().unwrap_or(0.0), r["height"].as_f64().unwrap_or(0.0)) };
         let et = n["elementType"].as_u64().unwrap_or(0);
         let role = if ios { format!("type{et}") } else { n["class"].as_str().unwrap_or("").rsplit('.').next().unwrap_or("").to_string() };
-        let text = if ios { n["label"].as_str().filter(|s| !s.is_empty()).or(n["value"].as_str()).unwrap_or("") } else { n["text"].as_str().filter(|s| !s.is_empty()).or(n["content-desc"].as_str()).unwrap_or("") };
+        let text = if ios { n["label"].as_str().filter(|s| !s.is_empty()).or(n["value"].as_str()).unwrap_or("") } else { n["text"].as_str().filter(|s| !s.is_empty()).or(n["content-desc"].as_str().filter(|s| !s.is_empty())).or(n["hint"].as_str()).unwrap_or("") };
         let clickable = if ios { matches!(et, 9 | 10 | 12 | 40 | 41 | 42 | 45 | 49 | 50 | 52 | 75 | 80) } else { n["clickable"].as_bool().unwrap_or(false) };
         out.push((role, text.trim().to_string(), clickable, x, y, w, h));
         for c in n["children"].as_array().into_iter().flatten() { walk(c, out); }
@@ -853,13 +907,14 @@ fn snapshot(dev: &str) -> R<Value> {
         } else {
             n["class"].as_str().unwrap_or("").rsplit('.').next().unwrap_or("").to_string()
         };
-        let text = if ios { n["label"].as_str().filter(|s| !s.is_empty()).or(n["value"].as_str()).unwrap_or("") } else { n["text"].as_str().filter(|s| !s.is_empty()).or(n["content-desc"].as_str()).unwrap_or("") };
+        let text = if ios { n["label"].as_str().filter(|s| !s.is_empty()).or(n["value"].as_str()).unwrap_or("") } else { n["text"].as_str().filter(|s| !s.is_empty()).or(n["content-desc"].as_str().filter(|s| !s.is_empty())).or(n["hint"].as_str()).unwrap_or("") };
         let id = if ios { n["identifier"].as_str().unwrap_or("") } else { n["resource-id"].as_str().unwrap_or("").rsplit('/').next().unwrap_or("") };
         let clickable = !ios && n["clickable"].as_bool().unwrap_or(false) || ios && matches!(role.as_str(), "Button" | "Cell" | "TextField" | "SecureField" | "SearchField" | "Switch" | "Link" | "Tab");
         let on_screen = bw > 0.0 && bh > 0.0 && x < w && y < h && x + bw > 0.0 && y + bh > 0.0;
         if on_screen && (!text.trim().is_empty() || clickable) && role != "Keyboard" {
             let r = format!("e{}", refs.len() + 1);
-            refs.insert(r.clone(), json!([x + bw / 2.0, y + bh / 2.0, x, y, bw, bh]));
+            let (cx, cy) = visible_center(x, y, bw, bh, w, h);
+            refs.insert(r.clone(), json!([cx, cy, x, y, bw, bh]));
             let t: String = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(80).collect();
             lines.push(format!("{}@{r} [{role}]{}{}", "  ".repeat(depth.min(6)), if t.is_empty() { String::new() } else { format!(" \"{t}\"") }, if id.is_empty() { String::new() } else { format!(" #{id}") }));
         }
@@ -925,8 +980,12 @@ fn handle(req: &Value) -> R<Value> {
             let mode = req.get("mode").and_then(|m| m.as_str()).unwrap_or("single");
             if helper_ok() {
                 let hold = if mode == "long" { 800 } else { 0 };
-                if agent_call(dev, &format!("tap {x} {y} {hold}")).is_ok() && (mode != "double" || agent_call(dev, &format!("tap {x} {y} 0")).is_ok()) {
-                    return Ok(json!({}));
+                match agent_call(dev, &format!("tap {x} {y} {hold}")) {
+                    Ok(_) if mode != "double" => return Ok(json!({})),
+                    // The first tap landed: finish the double tap with exactly one more, never restart it.
+                    Ok(_) => return agent_call(dev, &format!("tap {x} {y} 0")).or_else(|e| if not_run(&e) { shell(dev, &format!("input tap {x} {y}")).map(|_| json!({})) } else { Err(e) }).map(|_| json!({})),
+                    Err(e) if !not_run(&e) => return Err(e),
+                    Err(_) => {}
                 }
             }
             let cmd = match mode {
@@ -938,8 +997,12 @@ fn handle(req: &Value) -> R<Value> {
         }
         "swipe" => {
             let ms = req.get("ms").and_then(|m| m.as_i64()).unwrap_or(300);
-            if helper_ok() && agent_call(dev, &format!("swipe {} {} {} {} {ms}", num(req, "x1")?, num(req, "y1")?, num(req, "x2")?, num(req, "y2")?)).is_ok() {
-                return Ok(json!({}));
+            if helper_ok() {
+                match agent_call(dev, &format!("swipe {} {} {} {} {ms}", num(req, "x1")?, num(req, "y1")?, num(req, "x2")?, num(req, "y2")?)) {
+                    Ok(_) => return Ok(json!({})),
+                    Err(e) if !not_run(&e) => return Err(e),
+                    Err(_) => {}
+                }
             }
             shell(dev, &format!("input swipe {} {} {} {} {ms}", num(req, "x1")?, num(req, "y1")?, num(req, "x2")?, num(req, "y2")?)).map(|_| json!({}))
         }
@@ -950,7 +1013,9 @@ fn handle(req: &Value) -> R<Value> {
         }
         "key" => {
             let code = match str_(req, "key")? { "back" => 4, "home" => 3, "recents" => 187, "enter" => 66, k => return Err(format!("unsupported key `{k}`")) };
-            if helper_ok() && agent_call(dev, &format!("key {code}")).is_ok() { return Ok(json!({})); }
+            if helper_ok() {
+                match agent_call(dev, &format!("key {code}")) { Ok(_) => return Ok(json!({})), Err(e) if !not_run(&e) => return Err(e), Err(_) => {} }
+            }
             shell(dev, &format!("input keyevent {code}")).map(|_| json!({}))
         }
         "launch" => {
@@ -961,7 +1026,7 @@ fn handle(req: &Value) -> R<Value> {
             let comp = shell(dev, &format!("cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER {app}"))
                 .map_err(|_| missing())?.lines().last().unwrap_or("").trim().to_string();
             if !comp.contains('/') { return Err(missing()); }
-            let out = shell(dev, &format!("am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n {comp}"))?;
+            let out = shell(dev, &format!("am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n {}", q(&comp)))?;
             if out.contains("Error") { return Err(out.trim().to_string()); }
             Ok(json!({ "activity": comp }))
         }
@@ -1029,7 +1094,8 @@ fn handle(req: &Value) -> R<Value> {
             if let Some(app) = req.get("app").and_then(|v| v.as_str()) {
                 // App sandbox (debuggable apps): stream through run-as.
                 let a = pkg(&json!({ "app": app }))?.to_string();
-                let bytes = adb(&["-s", dev, "exec-out", "run-as", &a, "cat", remote])?;
+                // adb joins exec-out args into one device shell line: quote the path (spaces, `;`).
+                let bytes = adb(&["-s", dev, "exec-out", &format!("run-as {a} cat {}", q(remote))])?;
                 std::fs::write(local, &bytes).map_err(|e| e.to_string())?;
                 return Ok(json!({ "saved": local, "bytes": bytes.len() }));
             }
@@ -1116,6 +1182,9 @@ fn handle(req: &Value) -> R<Value> {
             let ws = ws.split_once("/devtools/").map(|(_, p)| format!("ws://127.0.0.1:{port}/devtools/{p}")).unwrap_or(ws);
             let expr = if op == "webview_dom" { "document.documentElement.outerHTML".to_string() } else { str_(req, "js")?.to_string() };
             let (mut sock, _) = tungstenite::connect(ws.as_str()).map_err(|e| format!("devtools: {e}"))?;
+            // A page that never answers (or `new Promise(() => {})`) must not hang the server for every device.
+            let secs = req.get("timeout_s").and_then(|v| v.as_u64()).unwrap_or(30);
+            if let tungstenite::stream::MaybeTlsStream::Plain(t) = sock.get_ref() { t.set_read_timeout(Some(std::time::Duration::from_secs(secs))).ok(); }
             sock.send(tungstenite::Message::text(json!({ "id": 1, "method": "Runtime.evaluate", "params": { "expression": expr, "returnByValue": true, "awaitPromise": true } }).to_string())).map_err(|e| e.to_string())?;
             loop {
                 let m = sock.read().map_err(|e| e.to_string())?;
@@ -1221,7 +1290,7 @@ fn handle(req: &Value) -> R<Value> {
             if mem.contains("No process found") { return Err(format!("{app} is not running")); }
             // "TOTAL PSS:  123456 ..." (newer) or "TOTAL   123456 ..." (older)
             let mem_kb = mem.lines().find(|l| l.trim_start().starts_with("TOTAL")).and_then(|l| l.split_whitespace().find_map(|t| t.parse::<u64>().ok()));
-            let cpu = shell(dev, &format!("top -b -n 1 | grep -m1 ' {app}$'"))?.split_whitespace().nth(8).and_then(|v| v.parse::<f64>().ok());
+            let cpu = shell(dev, &format!("top -b -n 1 | grep -m1 ' {app}$'; true"))?.split_whitespace().nth(8).and_then(|v| v.parse::<f64>().ok());
             let gfx = shell(dev, &format!("dumpsys gfxinfo {app}"))?;
             let grab = |k: &str| gfx.lines().find(|l| l.trim_start().starts_with(k)).map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string());
             if req.get("reset").and_then(|v| v.as_bool()).unwrap_or(false) { let _ = shell(dev, &format!("dumpsys gfxinfo {app} reset")); }
@@ -1342,6 +1411,18 @@ fn handle(req: &Value) -> R<Value> {
     }
 }
 
+/// A CLI flag value: numbers and booleans are typed, except flags that name or carry text (`--set 1` writes "1",
+/// `--device 0123456789` is a serial, `--text 1234` is typed as text).
+fn cli_value(k: &str, raw: String) -> Value {
+    if matches!(k, "device" | "set" | "text" | "name" | "id" | "key" | "app" | "path" | "output" | "file" | "url" | "js" | "title" | "locale" | "permission" | "socket") {
+        return Value::String(raw);
+    }
+    match raw.as_str() {
+        "true" => json!(true), "false" => json!(false),
+        _ => raw.parse::<i64>().map(|n| json!(n)).or_else(|_| raw.parse::<f64>().map(|n| json!(n))).unwrap_or(Value::String(raw)),
+    }
+}
+
 /// CLI mode, one command per process:
 ///   mobiusagent-driver devices
 ///   mobiusagent-driver dump|apps|foreground|size|info|hide_keyboard [--device ID]
@@ -1359,8 +1440,7 @@ fn cli(args: Vec<String>) -> i32 {
     while i < args.len() {
         if let Some(k) = args[i].strip_prefix("--") {
             let flag = matches!(k, "submit" | "json" | "reset");
-            let v = if flag { Value::Bool(true) } else { i += 1; let raw = args.get(i).cloned().unwrap_or_default(); match raw.as_str() { "true" => json!(true), "false" => json!(false),
-                _ => raw.parse::<i64>().map(|n| json!(n)).or_else(|_| raw.parse::<f64>().map(|n| json!(n))).unwrap_or(Value::String(raw)) } };
+            let v = if flag { Value::Bool(true) } else { i += 1; cli_value(k, args.get(i).cloned().unwrap_or_default()) };
             req[k] = v;
         } else { pos.push(args[i].clone()); }
         i += 1;
@@ -1453,5 +1533,45 @@ mod tests {
     #[test]
     fn quoting_survives_shell_metacharacters() {
         assert_eq!(q("it's; rm -rf /"), r"'it'\''s; rm -rf /'");
+    }
+
+    #[test]
+    fn tap_center_is_on_the_visible_part() {
+        // half off the right edge: x=800 w=600 on 1080 → visible 800..1080
+        assert_eq!(visible_center(800.0, 0.0, 600.0, 100.0, 1080.0, 2400.0), (940.0, 50.0));
+        // half off the left / top
+        assert_eq!(visible_center(-500.0, -40.0, 600.0, 100.0, 1080.0, 2400.0), (50.0, 30.0));
+        // fully visible: plain center
+        assert_eq!(visible_center(100.0, 200.0, 200.0, 100.0, 1080.0, 2400.0), (200.0, 250.0));
+    }
+
+    #[test]
+    fn unknown_command_is_parsed_not_searched() {
+        assert!(unknown_command(r#"{"error":"unknown command"}"#));
+        assert!(!unknown_command(r#"{"windows":[{"text":"bash: unknown command"}]}"#));
+        assert!(!unknown_command("pong abc"));
+    }
+
+    #[test]
+    fn gesture_replies_wait_for_the_gesture() {
+        assert_eq!(reply_timeout("dump").as_millis(), 10_000);
+        assert_eq!(reply_timeout("swipe 1 2 3 4 15000").as_millis(), 25_000);
+        assert_eq!(reply_timeout("tap 5 5 800").as_millis(), 10_800);
+        assert!(!not_run(&format!("{OUTCOME_UNKNOWN}x")) && not_run("broken pipe"));
+    }
+
+    #[test]
+    fn cli_keeps_text_flags_as_strings() {
+        assert_eq!(cli_value("set", "1".into()), json!("1"));
+        assert_eq!(cli_value("device", "0123456789".into()), json!("0123456789"));
+        assert_eq!(cli_value("max", "768".into()), json!(768));
+        assert_eq!(cli_value("submit", "true".into()), json!(true));
+    }
+
+    #[test]
+    fn percentiles_ignore_nan() {
+        let s = |cpu| crate::report::Sample { t_ms: 0, cpu: Some(cpu), mem_mb: None, threads: None };
+        let v = crate::report::summarize(&[s(1.0), s(f64::NAN), s(3.0)]);
+        assert_eq!(v["cpu_percent"]["max"], json!(3.0));
     }
 }

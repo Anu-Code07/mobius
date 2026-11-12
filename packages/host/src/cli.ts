@@ -14,7 +14,8 @@ import type { Connector } from './execution/connector.ts';
 
 /** Every online device through the Mobius driver. iOS devices also need the Mobius Agent runner set up once. */
 const connectors = (driver: MobiusAgentDriver) => async (): Promise<Connector[]> => {
-  if (!driverBuilt()) throw new Error(`Mobius driver not built: run \`cargo build --release\` in drivers/mobiusagent-driver (expected ${driverPath()})`);
+  if (!driverBuilt()) throw new Error(`No Mobius driver for ${process.platform}-${process.arch} in this install (looked for ${driverPath()}). ` +
+    'Build it from https://github.com/Anu-Code07/mobius (`cargo build --release` in drivers/mobiusagent-driver) and point MOBIUS_DRIVER_BIN at the binary.');
   const ios = iosAgentReady();
   return (await driver.devices()).filter(d => d.state === 'online' && (d.platform === 'android' || ios)).map(d => new MobiusAgentConnector(driver, d));
 };

@@ -172,7 +172,9 @@ export class ObservationStore {
 
   add(obs: Observation, fps: Map<string, Fingerprint>) {
     this.history.push({ obs, fps });
-    if (this.history.length > 5) this.history.shift();
+    // ponytail: settle/verify polls add an observation every ~100 ms, so a small window evicts the ids the agent
+    // just got from observe after one slow action. 64 covers a full verify timeout; the on-disk copy stays at 5.
+    if (this.history.length > 64) this.history.shift();
     if (!this.file) return;
     this.saved.push([...fps].map(([id, f]) => ({ id, hash: identityHash(f), dup: f.dup_index, rid: !!f.resource_id })));
     this.saved = this.saved.slice(-5);

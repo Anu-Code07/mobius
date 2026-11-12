@@ -119,3 +119,28 @@ test('tapping a big card avoids the clickable item drawn at its center', async (
   assert.ok(p.y >= 478 && p.y <= 900, 'still inside the card');
   assert.deepEqual(center(card), { x: 196.5, y: 689 }, 'no screen given: plain center');
 });
+
+test('ids from the agent\'s observe survive the polls of a slow action (settle/verify)', () => {
+  const store = new ObservationStore();
+  const seen = build(store);
+  for (let i = 0; i < 30; i++) build(store); // ~3 s of 100 ms settle/verify polls
+  const el = seen.elements.find(e => e.clickable)!;
+  assert.equal(store.resolve(el.id).text, el.text);
+});
+
+test('tap point: clipped to the screen, off floating bars, refused when covered or off screen', async () => {
+  const { center } = await import('../src/execution/session.ts');
+  const el = (id: string, x: number, y: number, w: number, h: number, more: any = {}) => ({ id, role: 'button', clickable: true, bounds: { x, y, width: w, height: h }, ...more }) as any;
+  const size = { width: 393, height: 852 };
+  // Row half below the screen, its visible strip under the floating search toolbar (iOS 26 Settings).
+  const general = el('e26', 16, 836, 361, 57), vpn = el('e24', 16, 745, 361, 57);
+  const toolbar = el('e36', 0, 766, 393, 86, { role: 'view', clickable: false, label: 'Toolbar' });
+  const search = el('e37', 32, 781, 328, 38, { role: 'textbox', editable: true });
+  const screen = [vpn, general, toolbar, search];
+  assert.throws(() => center(general, screen, size), /covered|off screen/);
+  const p = center(vpn, screen, size); // partly under the toolbar: tap its uncovered top
+  assert.ok(p.y >= 745 && p.y < 766, `y=${p.y}`);
+  assert.throws(() => center(el('e9', 16, 900, 361, 57), screen, size), /off screen/);
+  const q = center(el('e1', 300, 10, 200, 40), [], size); // wider than the screen: center of the visible part
+  assert.ok(q.x <= 393 && q.x >= 300, `x=${q.x}`);
+});

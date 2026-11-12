@@ -24,6 +24,8 @@ export const DEFAULT_EXPECT_TIMEOUT_MS = 6_000;
 export const LAUNCH_EXPECT_TIMEOUT_MS = 20_000;
 /** Pause between re-reads while waiting for the screen. */
 const POLL_MS = 100;
+/** How long an unchanged pre-action screen is waited on before settle accepts it (see settle). */
+const SETTLE_GRACE_MS = 600;
 
 /** Text read from pixels, as an element the policy can judge like any label. */
 const drawnText = (text: string, bounds: Element['bounds']): Element => ({ id: 'drawn', role: 'text', text, label: null, resource_id: null,
@@ -33,22 +35,42 @@ const drawnText = (text: string, bounds: Element['bounds']): Element => ({ id: '
 /** Where to touch an element: the center of its on-screen part (an element partly above/left of the screen has negative
  *  bounds; its raw center can be off-screen). Given the screen, a point not covered by a smaller clickable element inside
  *  it: tapping a big card's center must not hit the item drawn there (live run: Swiggy's restaurant card opened a burger). */
-export const center = (e: Element, screen?: readonly Element[]) => {
+type Box = Element['bounds'];
+const has = (b: Box, p: { x: number; y: number }) => p.x >= b.x && p.x <= b.x + b.width && p.y >= b.y && p.y <= b.y + b.height;
+const holds = (o: Box, i: Box) => o.x <= i.x && o.y <= i.y && o.x + o.width >= i.x + i.width && o.y + o.height >= i.y + i.height;
+
+/**
+ * Where to tap an element: inside its on-screen part, off its own clickable children (a card's inner button),
+ * and off anything drawn over it (a floating toolbar, tab bar or sheet: a later element that isn't its ancestor).
+ * Throws when no point of it is visibly tappable, so a covered or off-screen target is never tapped "successfully".
+ */
+export const center = (e: Element, screen?: readonly Element[], size?: { width: number; height: number }) => {
+  const W = size?.width || Infinity, H = size?.height || Infinity;
   const x1 = Math.max(e.bounds.x, 0), y1 = Math.max(e.bounds.y, 0);
-  const x2 = Math.max(e.bounds.x + e.bounds.width, x1), y2 = Math.max(e.bounds.y + e.bounds.height, y1);
+  const x2 = Math.min(e.bounds.x + e.bounds.width, W), y2 = Math.min(e.bounds.y + e.bounds.height, H);
+  if (x2 <= x1 || y2 <= y1) {
+    if (size) throw new MobiusError('ELEMENT_NOT_FOUND', `${e.id} is off screen`, { hint: 'Scroll it into view, observe, then tap.' });
+    return { x: Math.max(x1, Math.min(x2, (x1 + x2) / 2)), y: Math.max(y1, Math.min(y2, (y1 + y2) / 2)) };
+  }
   const mid = { x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
   if (!screen) return mid;
-  const inside = (o: Element) => o.bounds.x >= e.bounds.x && o.bounds.y >= e.bounds.y && o.bounds.x + o.bounds.width <= e.bounds.x + e.bounds.width
-    && o.bounds.y + o.bounds.height <= e.bounds.y + e.bounds.height && o.bounds.width * o.bounds.height < e.bounds.width * e.bounds.height;
-  const kids = screen.filter(o => o !== e && o.id !== e.id && (o.clickable || o.editable) && inside(o));
-  if (!kids.length) return mid;
-  const hit = (p: { x: number; y: number }) => kids.some(k => p.x >= k.bounds.x && p.x <= k.bounds.x + k.bounds.width && p.y >= k.bounds.y && p.y <= k.bounds.y + k.bounds.height);
+  const idx = screen.findIndex(o => o === e || o.id === e.id);
+  const area = (b: Box) => b.width * b.height;
+  const kids = screen.filter(o => o !== e && o.id !== e.id && (o.clickable || o.editable) && holds(e.bounds, o.bounds) && area(o.bounds) < area(e.bounds));
+  // Drawn on top: later in tree order, overlapping, neither its ancestor nor its descendant, and not a decoration
+  // that passes touches through (plain text/images inside the overlap still block a tap on what's below).
+  const over = idx < 0 ? [] : screen.slice(idx + 1).filter(o => !holds(o.bounds, e.bounds) && !holds(e.bounds, o.bounds)
+    && (o.clickable || o.editable || o.scrollable || /toolbar|tab ?bar|navigation bar|sheet/i.test(`${o.label ?? ''} ${o.text ?? ''}`)));
+  const blocked = (p: { x: number; y: number }) => kids.some(k => has(k.bounds, p)) || over.some(o => has(o.bounds, p));
   const at = (fx: number, fy: number) => ({ x: x1 + (x2 - x1) * fx, y: y1 + (y2 - y1) * fy });
   for (const [fx, fy] of [[0.5, 0.5], [0.5, 0.12], [0.12, 0.5], [0.88, 0.5], [0.5, 0.88], [0.12, 0.12], [0.88, 0.12], [0.12, 0.88], [0.88, 0.88], [0.3, 0.12], [0.7, 0.12]] as const) {
     const p = at(fx, fy);
-    if (!hit(p)) return p;
+    if (!blocked(p)) return p;
   }
-  return mid; // fully covered: the children are the target in practice
+  if (over.length && [[0.5, 0.5], [0.12, 0.12], [0.88, 0.88]].every(([fx, fy]) => over.some(o => has(o.bounds, at(fx!, fy!))))) {
+    throw new MobiusError('ELEMENT_NOT_FOUND', `${e.id} is covered by ${over.map(o => o.label || o.text || o.role).slice(0, 2).join(', ')}`, { hint: 'Scroll it into view, observe, then tap.' });
+  }
+  return mid; // fully covered by its own children: the children are the target in practice
 };
 
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
@@ -75,6 +97,8 @@ export function expectationMet(obs: Observation, ex: Expect): boolean {
 export class DeviceSession {
   readonly connector: Connector;
   readonly store: ObservationStore;
+  /** The observation last shown to the agent (observe / list / snapshot): short refs like @e5 point into it, not into internal polls. */
+  shown: string | null = null;
   private readonly audit: AuditLog;
   private readonly policy: Policy;
   private readonly approver: Approver;
@@ -101,7 +125,7 @@ export class DeviceSession {
     if (guard.ctx.mutating && (guard.targetId || guard.point)) await this.observe();
     const latest = this.store.latest();
     let target = guard.targetId ? this.store.resolve(guard.targetId) : guard.point ? this.elementAt(guard.point.x, guard.point.y) : null;
-    const p = guard.point ?? (target ? center(target, latest?.elements) : null);
+    const p = guard.point ?? (target ? center(target, latest?.elements, latest?.screen) : null);
     const under = p ? this.elementsAt(p.x, p.y) : [];
     // Pixels, not just labels: on a screen showing an amount due, read the text actually drawn where the finger lands
     // (OCR), so a Pay button can't hide behind an accessibility label that says "Close".
@@ -165,13 +189,18 @@ export class DeviceSession {
     return obs;
   }
 
-  /** Re-observe until two consecutive screens hash the same (UI settled), bounded. State-based, no fixed sleeps. */
-  private async settle(deadline: number): Promise<Observation> {
+  /**
+   * Re-observe until two consecutive screens hash the same (UI settled), bounded. State-based, no fixed sleeps.
+   * Two identical frames of the *pre-action* screen only count after a grace window: a tap that launches an
+   * activity takes a beat before the window changes, and settling early reports the old screen as the result.
+   */
+  private async settle(deadline: number, preHash: string | null = null): Promise<Observation> {
+    const graceEnd = Date.now() + SETTLE_GRACE_MS;
     let prev = await this.observe();
     while (Date.now() < deadline) {
       await new Promise(r => setTimeout(r, POLL_MS));
       const next = await this.observe();
-      if (next.screen_hash === prev.screen_hash) return next;
+      if (next.screen_hash === prev.screen_hash && (next.screen_hash !== preHash || Date.now() >= graceEnd)) return next;
       prev = next;
     }
     return prev;
@@ -207,7 +236,7 @@ export class DeviceSession {
     if (element_id) {
       const el = this.store.resolve(element_id);
       if (!el.enabled) throw new MobiusError('ELEMENT_NOT_FOUND', `${element_id} is disabled`, { hint: 'Wait for it to enable or pick another element.' });
-      return { ...center(el, this.store.latest()?.elements), el };
+      return { ...center(el, this.store.latest()?.elements, this.store.latest()?.screen), el };
     }
     if (x !== undefined && y !== undefined) {
       const s = this.store.latest()?.screen;
@@ -250,7 +279,7 @@ export class DeviceSession {
         const message = await withTimeout(exec(target), opts.timeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS, tool);
         const verifying = !!opts.expect || !!opts.check;
         const deadline = Date.now() + (verifying ? opts.verifyMs ?? DEFAULT_EXPECT_TIMEOUT_MS : 2_500);
-        let obs = await this.settle(Math.min(deadline, Date.now() + 2_500));
+        let obs = await this.settle(Math.min(deadline, Date.now() + 2_500), preHash);
         let verified: boolean | null = null;
         let why = '';
         const evaluate = (o: Observation) => {

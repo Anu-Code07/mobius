@@ -125,6 +125,7 @@ export function createServer(mobius: Mobius): McpServer {
     const s = await mobius.session(device_id);
     const obs = await s.observe();
     if (s.isBlockedApp(obs.foreground_app)) return json(blockedView(obs));
+    s.shown = obs.observation_id;
     const out = json(compactObservation(obs));
     if (!screenshot) return out;
     // Text is masked element by element; pixels can't be. While a secret is on screen, no screenshot leaves the device.

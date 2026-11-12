@@ -47,6 +47,7 @@ async function home() {
   await call('open_app', { app_id: APP });
   for (let i = 0; i < 12; i++) {
     const o = await obs();
+    if (o.foreground_app !== APP) { await call('open_app', { app_id: APP }); continue; } // Back left the app
     if (byRid(o, 'nav_services')) return o;
     const h = byRid(o, 'home'); if (h) { await call('tap', { element_id: h.id }); continue; }
     await back();

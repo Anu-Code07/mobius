@@ -9,7 +9,9 @@ pub fn summarize(samples: &[Sample]) -> Value {
     let stat = |v: Vec<f64>| -> Value {
         if v.is_empty() { return Value::Null; }
         let mut s = v.clone();
-        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        s.retain(|v| v.is_finite()); // a NaN sample from the device must not panic the server
+        if s.is_empty() { return Value::Null; }
+        s.sort_by(f64::total_cmp);
         let avg = s.iter().sum::<f64>() / s.len() as f64;
         let p = |q: f64| s[((s.len() - 1) as f64 * q).round() as usize];
         json!({ "avg": r1(avg), "p90": r1(p(0.9)), "max": r1(*s.last().unwrap()), "min": r1(s[0]) })
