@@ -205,7 +205,8 @@ export class Policy {
   evaluate(ctx: PolicyContext): Verdict {
     const base = this.builtin(ctx);
     const t = ctx.target;
-    // Only the parts that exist, so an anchored rule target ("^Reels$") matches a label-only button.
+    // A rule target is tried on the text, the label and the id separately, then on all of them: "^Reels$" matches
+    // Instagram's tab whose label is "Reels" and id "reels-tab" (live run).
     const words = t ? [t.text, t.label, t.resource_id].filter(Boolean).join(' ') : '';
     const cls = base.action_class !== 'unknown' ? base.action_class : classify(words);
     const decl = declaredAction(t) ?? (ctx.under ?? []).map(declaredAction).find(Boolean) ?? null;
@@ -218,7 +219,7 @@ export class Policy {
       const ceiling = amount === null ? null : Math.max(amount, ...shown);
       const r = this.config.rules.find(r =>
         (!r.app || appRe([r.app])!.test(ctx.app ?? '')) && (!r.tool || r.tool.includes(ctx.tool))
-        && (!r.action_class || r.action_class.includes(cls)) && (!r.target || new RegExp(r.target, 'i').test(words))
+        && (!r.action_class || r.action_class.includes(cls)) && (!r.target || [t?.text, t?.label, t?.resource_id, words].some(v => !!v && new RegExp(r.target!, 'i').test(v)))
         && (r.max_amount === undefined || (ceiling !== null && ceiling <= r.max_amount)));
       if (r) v = { ...v, decision: r.effect, reason: `rule ${r.id}${r.description ? `: ${r.description}` : ''} (was: ${base.reason})`, rule_id: r.id };
     }
@@ -261,8 +262,18 @@ export class Policy {
     }
     // Layer 1: the target, or anything under the tap point (overlays), says it commits: any language, icon glyphs,
     // look-alike letters, or a word split across child views ("P · ay"). Swipes count: "Slide to pay".
+    // Ancestors of the target (they contain it and come before it in the tree) repeat their children's labels on iOS:
+    // Myntra's full-screen container reads "… bottom navigation Home Minis Post Saved Profile", so "Post" made a tap
+    // on the search bar a send (live run). Overlays drawn after the target are still checked.
+    const order = new Map((ctx.screen ?? []).map((e, i) => [e.id, i]));
+    const holds = (o: Element['bounds'], i: Element['bounds']) => o.x <= i.x && o.y <= i.y && o.x + o.width >= i.x + i.width && o.y + o.height >= i.y + i.height;
+    // A target read from pixels (OCR) isn't in the tree: an enclosing view that can't itself be tapped plays the same role.
+    const ancestor = (e: Element) => !!t && e.id !== t.id && holds(e.bounds, t.bounds) && (order.has(t.id)
+      ? (order.get(e.id) ?? Infinity) < order.get(t.id)!
+      : !(e.clickable || e.editable || e.long_clickable));
+    const under = (ctx.under ?? []).filter(e => !ancestor(e));
     if (gesture) {
-      for (const e of [...(t ? [t] : []), ...(ctx.under ?? [])]) {
+      for (const e of [...(t ? [t] : []), ...under]) {
         const w = wordsOf(e);
         const hit = this.risky.exec(w) ?? this.risky.exec(w.replace(/\s*·\s*/g, ''));
         if (hit) return out('approval_required', `${e === t ? 'target' : 'element under the tap'} "${(e.text ?? e.label ?? e.resource_id ?? '').slice(0, 60)}" looks consequential ("${hit[2]}")`, classify(hit[2]!));

@@ -34,6 +34,7 @@ test('policy as code: an anchored target matches a label-only control', () => {
   const p = withRules([{ id: 'ig-tabs', effect: 'allow', app: 'com\\.burbn\\.instagram', tool: ['tap'], target: '^(Reels|Main feed|Explore)$' }]);
   const tap = (label: string) => p.evaluate({ tool: 'tap', mutating: true, app: 'com.burbn.instagram', target: el({ label }) });
   assert.equal(tap('Reels').decision, 'allow');
+  assert.equal(p.evaluate({ tool: 'tap', mutating: true, app: 'com.burbn.instagram', target: el({ label: 'Reels', resource_id: 'reels-tab' }) }).decision, 'allow', 'an id alongside the label');
   assert.equal(tap('Send').decision, 'approval_required', 'other Instagram taps still ask');
 });
 

@@ -230,7 +230,10 @@ export function registerMobiusTools(server: McpServer, handlers: Map<string, Han
     async ({ device, text, exact, index }) => {
       const { s, o } = await screenOf(device);
       const hits = o.elements.filter(e => matches(e, text, !!exact));
-      const ranked = [...hits.filter(e => e.clickable || e.role === 'button'), ...hits.filter(e => !(e.clickable || e.role === 'button'))];
+      // Most specific first: an exact text/label match, then clickable, then the smallest box. A container whose label
+      // merely contains the words ("location-selector MynCash ₹0 HPSearchBar …", Myntra live run) comes last.
+      const score = (e: Element) => (matches(e, text, true) ? 0 : 4) + (e.clickable || e.role === 'button' ? 0 : 2);
+      const ranked = [...hits].sort((x, y) => score(x) - score(y) || x.bounds.width * x.bounds.height - y.bounds.width * y.bounds.height);
       const el = ranked[index ?? 0];
       if (el && tappable(el, o)) return call('tap', { device_id: device, element_id: el.id });
       if (el) {

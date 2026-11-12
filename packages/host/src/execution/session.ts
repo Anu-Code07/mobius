@@ -169,7 +169,9 @@ export class DeviceSession {
     const under = p ? this.elementsAt(p.x, p.y) : [];
     // Pixels, not just labels: on a screen showing an amount due, read the text actually drawn where the finger lands
     // (OCR), so a Pay button can't hide behind an accessibility label that says "Close".
-    if (guard.ctx.mutating && p && this.connector.extra && moneyOnScreen(latest?.elements)) {
+    // An x,y tap that hits no element is read the same way, on any screen: the drawn text becomes its identity below.
+    const blind = !target && !!guard.point && !!guard.ctx.coordinate;
+    if (guard.ctx.mutating && p && this.connector.extra && (moneyOnScreen(latest?.elements) || blind)) {
       const drawn = await this.connector.extra('ocr', {}).catch(() => null);
       const b = target?.bounds;
       for (const t of drawn?.text ?? []) {
@@ -180,7 +182,11 @@ export class DeviceSession {
         if (hit && t.text) under.push(drawnText(String(t.text), { x, y, width: w, height: h }));
       }
     }
-    const v = this.policy.evaluate({ ...guard.ctx, tool, app: latest?.foreground_app ?? null, target, screen: latest?.elements, under });
+    // Mobius reads the pixels itself (the agent can't supply this): text drawn at a blind x,y is what the policy judges,
+    // so "SOJANYA Embroidered Kurta" can be tapped while drawn "Pay ₹999" still asks and an icon with no text still asks.
+    const drawnAt = blind ? under.filter(e => e.id === 'drawn') : [];
+    const judged = drawnAt.length ? drawnText(drawnAt.map(e => e.text).join(' '), drawnAt[0]!.bounds) : target;
+    const v = this.policy.evaluate({ ...guard.ctx, tool, app: latest?.foreground_app ?? null, target: judged, screen: latest?.elements, under });
     this.verdict = v;
     const { decision, reason, action_class } = v;
     if (decision === 'blocked') throw new MobiusError('POLICY_BLOCKED', `Blocked by policy: ${reason}`, { hint: 'Ask the user to do this step themselves.' });

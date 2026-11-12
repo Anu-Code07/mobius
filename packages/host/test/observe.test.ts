@@ -180,3 +180,23 @@ test('keyboard area is the keys, not a full-screen transparent IME window (Andro
   const { obs } = buildObservation(s, 'dev1', 'android', 'o1', 'native');
   assert.deepEqual(obs.keyboard, { x: 0, y: 1088, width: 1080, height: 748 });
 });
+
+test('nested same-box wrappers resolve as one control; separate look-alikes stay ambiguous', () => {
+  const node = (label: string, x: number, y: number, w: number, h: number, children: RawNode[] = []): RawNode => ({ cls: 'Other', pkg: '', text: '', desc: label, resourceId: '',
+    clickable: true, longClickable: false, enabled: true, focused: false, scrollable: false, checkable: false, checked: false, selected: false, password: false,
+    bounds: { x, y, width: w, height: h }, path: 'r', children });
+  const shot = (kids: RawNode[]): RawScreen => ({ root: node('', 0, 0, 393, 852, kids), width: 393, height: 852, rotation: 0, foregroundApp: 'com.myntra.Myntra' });
+  const store = new ObservationStore();
+  const nested = () => shot([node('HPSearchBar', 12, 91, 238, 40, [node('HPSearchBar', 12, 91, 230, 40)])]);
+  const a = buildObservation(nested(), 'd', 'ios', store.nextId(), 'native'); store.add(a.obs, a.fps);
+  const id = a.obs.elements.filter(e => e.label === 'HPSearchBar').at(-1)!.id;
+  const b = buildObservation(nested(), 'd', 'ios', store.nextId(), 'native'); store.add(b.obs, b.fps);
+  assert.equal(store.resolve(id).label, 'HPSearchBar');
+
+  const store2 = new ObservationStore();
+  const apart = () => shot([node('Buy', 10, 100, 100, 40), node('Buy', 10, 600, 100, 40)]);
+  const c = buildObservation(apart(), 'd', 'ios', store2.nextId(), 'native'); store2.add(c.obs, c.fps);
+  const id2 = c.obs.elements.find(e => e.label === 'Buy')!.id;
+  const d = buildObservation(apart(), 'd', 'ios', store2.nextId(), 'native'); store2.add(d.obs, d.fps);
+  assert.throws(() => store2.resolve(id2), /AMBIGUOUS|matches 2/);
+});

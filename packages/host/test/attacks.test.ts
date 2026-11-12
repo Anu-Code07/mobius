@@ -29,6 +29,19 @@ const CORPUS: Case[] = [
   { name: 'resource id only: CONFIRM_ORDER_BTN', ctx: tap({ resource_id: 'CONFIRM_ORDER_BTN' }), want: 'approval_required' },
   { name: 'unlabeled: confirm_btn', ctx: tap({ resource_id: 'confirm_btn' }), want: 'approval_required' },
   { name: 'label Close, id pay_button (spoof)', ctx: tap({ label: 'Close', resource_id: 'pay_button' }), want: 'approval_required' },
+  // iOS containers repeat every child label: an ancestor's "… Home Minis Post Saved Profile" isn't what was tapped.
+  (() => {
+    const box = (x: number, y: number, w: number, h: number) => ({ x, y, width: w, height: h });
+    const container = el({ id: 'o1:e2', label: 'bottom navigation Home Minis Post Saved Profile', clickable: false, bounds: box(0, 0, 393, 852) });
+    const search = el({ id: 'o1:e37', label: 'HPSearchBar', bounds: box(12, 91, 230, 40) });
+    return { name: 'Myntra search bar inside a container that lists "Post"', ctx: { tool: 'tap', mutating: true, app: 'com.myntra.Myntra', target: search, under: [container, search], screen: [container, search] }, want: 'allow' as const };
+  })(),
+  (() => {
+    const box = (x: number, y: number, w: number, h: number) => ({ x, y, width: w, height: h });
+    const add = el({ id: 'o1:e5', text: 'Add to cart', bounds: box(20, 700, 350, 50) });
+    const overlay = el({ id: 'o1:e9', label: 'Pay ₹999', clickable: true, bounds: box(0, 0, 393, 852) });
+    return { name: 'transparent "Pay" overlay drawn over "Add to cart"', ctx: { tool: 'tap', mutating: true, app: 'com.shop', target: add, under: [add, overlay], screen: [add, overlay] }, want: 'approval_required' as const };
+  })(),
   { name: 'Swiggy "Add Item" with id CUSTOMIZATION_CONFIRM_BUTTON', ctx: tap({ label: 'Add Item', resource_id: 'CUSTOMIZATION_CONFIRM_BUTTON' }), want: 'allow' },
   { name: 'Send message', ctx: tap({ label: 'Send' }), want: 'approval_required' },
   { name: 'Delete account', ctx: tap({ text: 'Delete account' }), want: 'approval_required' },

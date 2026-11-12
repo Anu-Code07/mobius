@@ -236,3 +236,20 @@ test('policy: camelCase ids are read as words; a ceiling rule uses the largest a
   assert.equal(v.decision, 'approval_required');
   assert.equal(capped.evaluate({ tool: 'tap', mutating: true, app: 'com.shop', target: el({ text: 'Pay ₹149' }), screen: [el({ text: 'Total ₹149' })] }).decision, 'allow');
 });
+
+test('blind x,y taps are judged on the text drawn there (read by Mobius, not supplied by the agent)', async () => {
+  // A product card with no accessibility label: the pixels read "SOJANYA Embroidered Straight Kurta" (Myntra live run).
+  const card = { ...txt('', R(200, 300, 180, 240)), text: '', desc: '', drawn: 'SOJANYA Embroidered Straight Kurta' } as any;
+  const hiddenPay = { ...txt('', R(20, 1500, 400, 100)), text: '', desc: '', drawn: 'Pay ₹999' } as any;
+  // iOS containers repeat every label inside them; this one also lists the tab bar's "Post".
+  const shell = { ...txt('', R(0, 0, 1080, 2400)), text: '', desc: 'feed grid bottom navigation Home Minis Post Saved Profile', drawn: '' } as any; // a label, not pixels
+  const dev = new OpsDevice({ screen: () => [shell, card, hiddenPay] } as any);
+  const { call } = await setup(dev);
+  await call('observe');
+  const kurta = await call('tap', { x: 290, y: 420 });
+  assert.equal(kurta.ok, true, JSON.stringify(kurta));
+  const pay = await call('tap', { x: 220, y: 1550 });
+  assert.equal(pay.error?.code, 'APPROVAL_REJECTED', 'drawn "Pay" still asks');
+  const blank = await call('tap', { x: 900, y: 2200 });
+  assert.equal(blank.error?.code, 'APPROVAL_REJECTED', 'nothing readable at the point still asks');
+});

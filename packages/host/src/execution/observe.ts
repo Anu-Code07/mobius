@@ -232,6 +232,13 @@ export class ObservationStore {
     const visible = matches.filter(e => e.bounds.y + e.bounds.height > 0 && e.bounds.y < H && e.bounds.x + e.bounds.width > 0 && e.bounds.x < W);
     if (visible.length === 1) return visible[0]!;
     if (exact.length === 1 && matches.length > 1 && fp.resource_id) return exact[0]!;
+    // Nested wrappers around one control (Myntra's two "HPSearchBar" views, 238 vs 230 px wide, same spot): every
+    // match is essentially the same box, so any of them is the same tap.
+    const area = (b: Element['bounds']) => Math.max(0, b.width) * Math.max(0, b.height);
+    const overlap = (a: Element['bounds'], b: Element['bounds']) =>
+      Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)) * Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+    const pick = exact[0] ?? matches[0]!;
+    if (matches.length > 1 && matches.every(m => overlap(m.bounds, pick.bounds) >= 0.85 * Math.max(area(m.bounds), area(pick.bounds)))) return pick;
     if (matches.length > 1) {
       throw new MobiusError('AMBIGUOUS_TARGET', `${id} matches ${matches.length} elements on the current screen`, {
         hint: `Pick one of: ${matches.map(m => m.id).join(', ')}`,
