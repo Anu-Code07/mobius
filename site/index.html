@@ -192,6 +192,15 @@ section.chapter { padding-block: clamp(72px, 11vw, 150px); border-top: 1px solid
 .bar-row .ms { font: 500 14px var(--mono); text-align: right; color: var(--ink); }
 .note { color: var(--ink-3); font-size: 14px; margin-top: 18px; max-width: 60ch; }
 
+/* live run */
+.runlog { list-style: none; padding: 0; margin: 28px 0 0; display: grid; gap: 18px; counter-reset: r; }
+.runlog li { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 16px; border-top: 1px solid var(--line); padding-top: 14px; }
+.runlog b { font: 700 15px var(--display); letter-spacing: -0.01em; color: var(--sign); }
+.runlog span { color: var(--ink-2); font-size: 16px; }
+.policy { margin: 0; background: var(--ground-deep); border: 1px solid var(--line); border-radius: 14px; padding: 18px; font: 400 13px/1.65 var(--mono); color: var(--ink-2); overflow-x: auto; }
+.policy .k { color: var(--ink-3); } .policy .v { color: var(--ink); } .policy .r { color: var(--sign); }
+.live .note code { font: 400 13px var(--mono); color: var(--ink); }
+
 /* film */
 .film { margin-top: 40px; border-radius: 22px; overflow: hidden; border: 1px solid var(--line); background: var(--ground-deep); aspect-ratio: 16 / 9; }
 .film video { width: 100%; height: 100%; object-fit: cover; }
@@ -211,6 +220,7 @@ footer a { color: var(--ink-2); }
 
 @media (max-width: 900px) {
   .hero, .split, .reads, .wallhead { grid-template-columns: 1fr; }
+  .runlog li { grid-template-columns: 1fr; gap: 4px; }
   .hero h1 span { white-space: normal; text-wrap: balance; }
   .stage { margin-bottom: 40px; }
   .steps { grid-template-columns: 1fr; }
@@ -358,9 +368,41 @@ footer a { color: var(--ink-2); }
 
   <section class="chapter" aria-labelledby="h-film">
     <div class="wrap">
-      <h2 id="h-film">Thirty seconds on a real device.</h2>
+      <h2 id="h-film">One minute on a real iPhone.</h2>
       <div class="film">
-        <video src="assets/launch.mp4" poster="assets/launch-poster.png" controls muted playsinline preload="none" aria-label="Launch video: Mobius orders food, stops at payment, ignores a hijack message and masks an OTP"></video>
+        <video src="assets/launch.mp4" poster="assets/launch-poster.png" controls muted playsinline preload="none" aria-label="Launch film on a real iPhone: Mobius orders a burger on Swiggy and stops at payment for approval, scrolls Instagram Reels under a policy rule, zooms Apple Maps and saves a screenshot, and finds a kurta on Myntra where Buy Now waits for approval"></video>
+      </div>
+    </div>
+  </section>
+
+  <section class="chapter" aria-labelledby="h-live">
+    <div class="wrap split live">
+      <div>
+        <h2 id="h-live">Real apps, a real iPhone, one afternoon.</h2>
+        <p class="lede">Everything in the film ran through Mobius on a personal iPhone 16, driven by an agent. Here is what Mobius decided at each step, straight from its signed audit log.</p>
+        <ol class="runlog">
+          <li><b>Swiggy</b><span>Searched "burger", added a Crispy Veg Double Patty, opened the cart. The tap on "Pay ₹128 using PhonePe UPI" stopped for approval. Rejected, nothing paid.</span></li>
+          <li><b>Instagram</b><span>Opened Reels and scrolled three reels. Allowed by a policy rule: scrolling is reading. Likes, comments and sends would still ask.</span></li>
+          <li><b>Apple Maps</b><span>Searched Cubbon Park, pinched to zoom, saved a screenshot.</span></li>
+          <li><b>Myntra</b><span>Found a kurta whose card has no accessibility label: Mobius read the pixels with OCR and judged what was drawn. "Buy Now" stopped for approval.</span></li>
+        </ol>
+      </div>
+      <div>
+<pre class="policy" aria-label="The policy file used in the run"><span class="k">{</span>
+  <span class="k">"rules":</span> [{
+    <span class="k">"id":</span> <span class="v">"instagram-scroll-is-reading"</span>,
+    <span class="k">"effect":</span> <span class="r">"allow"</span>,
+    <span class="k">"app":</span> <span class="v">"com\\.burbn\\.instagram"</span>,
+    <span class="k">"tool":</span> [<span class="v">"scroll"</span>, <span class="v">"swipe"</span>]
+  }, {
+    <span class="k">"id":</span> <span class="v">"instagram-tabs-are-navigation"</span>,
+    <span class="k">"effect":</span> <span class="r">"allow"</span>,
+    <span class="k">"app":</span> <span class="v">"com\\.burbn\\.instagram"</span>,
+    <span class="k">"tool":</span> [<span class="v">"tap"</span>],
+    <span class="k">"target":</span> <span class="v">"^(Reels|Main feed|Explore)$"</span>
+  }]
+<span class="k">}</span></pre>
+        <p class="note">Rules are plain JSON in <code>MOBIUS_POLICY</code>. They can relax a default ask, never a hard block, and every decision records the rule that made it. The run also turned up six edge cases in real apps; each is now fixed and covered by a test.</p>
       </div>
     </div>
   </section>
