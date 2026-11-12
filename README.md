@@ -520,7 +520,7 @@ Everything an operator needs to let agents loose on phones, in the Mobius engine
 | **Apps declare sensitive actions** | An app tags a control `mobius:payment:438:INR` (Flutter: [`mobius_protect`](packages/mobius_protect), iOS identifier, or Android resource id `mobius_payment_438_INR`). The declaration outranks whatever the button says, and the amount feeds amount rules. That closes the "lying label" attack for apps that opt in. |
 | **Open protocol** | [Mobius Agent Safety Protocol (MASP) 0.1](docs/spec/SPEC.md): action classes, decisions, approvals, sessions, audit records and app declarations, with JSON Schemas. Break Mobius is its conformance suite. |
 
-**Deploying safely:** Mobius protects actions that go *through* it. Give production agents Mobius as their only phone tools (no shell, no adb), as [mobius-qa](https://github.com/Anu-Code07/mobius-qa) does, and use device-owner or webhook approvals.
+**Deploying safely:** Mobius protects actions that go *through* it. Give production agents Mobius as their only phone tools (no shell, no adb), and use device-owner or webhook approvals.
 
 Verified with Claude Code (a real headless agent run) and the official MCP SDK client. The Cursor config hasn't been tested yet.
 
@@ -597,7 +597,6 @@ fixtures/flutter            test app
 tests/e2e                   live suites + screenshot generator
 ```
 
-Related: **[mobius-qa](https://github.com/Anu-Code07/mobius-qa)**, an AI mobile QA engineer built on Mobius.
 
 ## License
 
