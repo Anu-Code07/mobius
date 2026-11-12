@@ -30,6 +30,13 @@ test('policy as code: amount-aware allow, first match wins, rule id recorded', (
   assert.equal(pay('Pay ₹149', 'com.other.app').decision, 'approval_required', 'rule is scoped to its app');
 });
 
+test('policy as code: an anchored target matches a label-only control', () => {
+  const p = withRules([{ id: 'ig-tabs', effect: 'allow', app: 'com\\.burbn\\.instagram', tool: ['tap'], target: '^(Reels|Main feed|Explore)$' }]);
+  const tap = (label: string) => p.evaluate({ tool: 'tap', mutating: true, app: 'com.burbn.instagram', target: el({ label }) });
+  assert.equal(tap('Reels').decision, 'allow');
+  assert.equal(tap('Send').decision, 'approval_required', 'other Instagram taps still ask');
+});
+
 test('policy as code: rules can never loosen a hard block', () => {
   const p = withRules([{ id: 'yolo', effect: 'allow' }]);
   assert.equal(p.evaluate({ tool: 'tap', mutating: true, app: 'com.phonepe.app', target: el({ text: 'Pay' }) }).decision, 'blocked');

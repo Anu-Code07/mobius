@@ -205,7 +205,8 @@ export class Policy {
   evaluate(ctx: PolicyContext): Verdict {
     const base = this.builtin(ctx);
     const t = ctx.target;
-    const words = t ? `${t.text ?? ''} ${t.label ?? ''} ${t.resource_id ?? ''}` : '';
+    // Only the parts that exist, so an anchored rule target ("^Reels$") matches a label-only button.
+    const words = t ? [t.text, t.label, t.resource_id].filter(Boolean).join(' ') : '';
     const cls = base.action_class !== 'unknown' ? base.action_class : classify(words);
     const decl = declaredAction(t) ?? (ctx.under ?? []).map(declaredAction).find(Boolean) ?? null;
     const amount = decl?.amount ?? amountInvolved(t, ctx.screen);
