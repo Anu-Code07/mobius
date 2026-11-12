@@ -1,6 +1,6 @@
 <!doctype html>
 <!--
-THESIS      AI gets your phone, you keep the keys: the human signs for the agent. Refuses the default "AI dev tool" page: dark shader, feature cards, fade-ups.
+THESIS      Your agent runs the phone, Mobius runs the trust: the human signs for the agent. Refuses the default "AI dev tool" page: dark shader, feature cards, fade-ups.
 OWN-WORLD   Midnight indigo from the Mobius Agent logo, its mint agent dot as the human's signing colour, fingerprint pads for holds.
 STORY       An agent can use your phone > it reaches Pay > Mobius holds the tap > you sign or it doesn't happen > install.
 FIRST-VIEW  Two-line H1 left with install command; live phone right where the agent's ₹349 tap waits for your thumb.
@@ -12,10 +12,10 @@ SIGNATURE   Verb: press-and-hold. Medium: fingerprint ridges filling from the pr
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Mobius: AI gets your phone, you keep the keys</title>
+<title>Mobius: your agent runs the phone, Mobius runs the trust</title>
 <meta name="description" content="Mobius is an open-source MCP server that lets AI agents use real Android phones, iPhones and simulators. Anything that pays, books or sends waits for your approval.">
 <meta name="theme-color" content="#14123a">
-<meta property="og:title" content="Mobius: AI gets your phone, you keep the keys">
+<meta property="og:title" content="Mobius: your agent runs the phone, Mobius runs the trust">
 <meta property="og:description" content="Let AI agents use a real phone. Payments, messages and secrets stay behind your thumb.">
 <meta property="og:image" content="assets/launch-poster.png">
 <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
@@ -72,11 +72,11 @@ p { margin: 0; text-wrap: pretty; }
 .top nav a:hover { color: var(--ink); background: var(--ground-lift); }
 
 /* hero */
-.hero { display: grid; grid-template-columns: 1.3fr .7fr; gap: clamp(28px, 5vw, 72px); align-items: center; padding-block: clamp(28px, 6vw, 72px) clamp(56px, 8vw, 110px); }
-.hero h1 { font-size: clamp(30px, 4.9vw, 72px); line-height: .98; letter-spacing: -0.045em; font-weight: 800; }
+.hero { display: grid; grid-template-columns: 1.3fr .7fr; gap: clamp(28px, 4vw, 56px) clamp(28px, 5vw, 72px); align-items: start; padding-block: clamp(28px, 6vw, 72px) clamp(56px, 8vw, 110px); }
+.hero h1 { grid-column: 1 / -1; font-size: clamp(34px, 5vw, 72px); margin-bottom: clamp(4px, 1vw, 16px); line-height: .98; letter-spacing: -0.045em; font-weight: 800; }
 .hero h1 span { display: block; white-space: nowrap; }
 .hero h1 .sign { color: var(--sign); }
-.hero .lede { margin-top: 28px; }
+.hero .lede { margin-top: 0; }
 .install { margin-top: 34px; display: flex; align-items: stretch; max-width: 640px; background: var(--ground-deep); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
 .hero > *, .split > *, .reads > *, .wallhead > *, .steps > * { min-width: 0; }
 .install code { flex: 1; min-width: 0; padding: 15px 16px; font: 500 14px/1.4 var(--mono); color: var(--ink); overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
@@ -211,6 +211,7 @@ footer a { color: var(--ink-2); }
 
 @media (max-width: 900px) {
   .hero, .split, .reads, .wallhead { grid-template-columns: 1fr; }
+  .hero h1 span { white-space: normal; text-wrap: balance; }
   .stage { margin-bottom: 40px; }
   .steps { grid-template-columns: 1fr; }
   .bar-row { grid-template-columns: 1fr 64px; }
@@ -238,8 +239,8 @@ footer a { color: var(--ink-2); }
 
 <main>
   <section class="wrap hero" aria-labelledby="h1">
+    <h1 id="h1"><span>Your agent runs the phone.</span><span class="sign">Mobius runs the trust.</span></h1>
     <div>
-      <h1 id="h1"><span>AI gets your phone.</span><span class="sign">You keep the keys.</span></h1>
       <p class="lede">Mobius lets Claude, Cursor or any MCP agent use a real Android phone, iPhone or simulator. The agent reads a clean, masked screen and taps through apps on its own. Anything that pays, books or sends waits for your thumb.</p>
       <div class="install">
         <code id="cmd"><b>$</b> claude mcp add mobius -- npx -y @anuraghq/mobius mcp</code>
@@ -247,7 +248,7 @@ footer a { color: var(--ink-2); }
       </div>
       <div class="links">
         <a href="https://github.com/Anu-Code07/mobius">Read the source</a>
-        <a href="#setup">Set up an iPhone</a>
+        <a href="#setup">Set up an iPhone or Android</a>
         <span>Apache-2.0, runs on your machine</span>
       </div>
       <div class="log" id="log" aria-live="polite" aria-label="What the agent is doing"></div>
