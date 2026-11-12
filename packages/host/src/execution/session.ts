@@ -44,7 +44,7 @@ const holds = (o: Box, i: Box) => o.x <= i.x && o.y <= i.y && o.x + o.width >= i
  * and off anything drawn over it (a floating toolbar, tab bar or sheet: a later element that isn't its ancestor).
  * Throws when no point of it is visibly tappable, so a covered or off-screen target is never tapped "successfully".
  */
-export const center = (e: Element, screen?: readonly Element[], size?: { width: number; height: number }) => {
+export const center = (e: Element, screen?: readonly Element[], size?: { width: number; height: number }, keyboard?: Box | null) => {
   const W = size?.width || Infinity, H = size?.height || Infinity;
   const x1 = Math.max(e.bounds.x, 0), y1 = Math.max(e.bounds.y, 0);
   const x2 = Math.min(e.bounds.x + e.bounds.width, W), y2 = Math.min(e.bounds.y + e.bounds.height, H);
@@ -61,16 +61,20 @@ export const center = (e: Element, screen?: readonly Element[], size?: { width: 
   // that passes touches through (plain text/images inside the overlap still block a tap on what's below).
   const over = idx < 0 ? [] : screen.slice(idx + 1).filter(o => !holds(o.bounds, e.bounds) && !holds(e.bounds, o.bounds)
     && (o.clickable || o.editable || o.scrollable || /toolbar|tab ?bar|navigation bar|sheet/i.test(`${o.label ?? ''} ${o.text ?? ''}`)));
-  const blocked = (p: { x: number; y: number }) => kids.some(k => has(k.bounds, p)) || over.some(o => has(o.bounds, p));
+  // The soft keyboard is drawn over the app too (its keys aren't in `screen`): a tap there types a letter.
+  const covers = keyboard ? [...over.map(o => o.bounds), keyboard] : over.map(o => o.bounds);
+  const covered = (p: { x: number; y: number }) => covers.some(b => has(b, p));
+  const blocked = (p: { x: number; y: number }) => kids.some(k => has(k.bounds, p)) || covered(p);
   const at = (fx: number, fy: number) => ({ x: x1 + (x2 - x1) * fx, y: y1 + (y2 - y1) * fy });
   for (const [fx, fy] of [[0.5, 0.5], [0.5, 0.12], [0.12, 0.5], [0.88, 0.5], [0.5, 0.88], [0.12, 0.12], [0.88, 0.12], [0.12, 0.88], [0.88, 0.88], [0.3, 0.12], [0.7, 0.12]] as const) {
     const p = at(fx, fy);
     if (!blocked(p)) return p;
   }
-  if (over.length && [[0.5, 0.5], [0.12, 0.12], [0.88, 0.88]].every(([fx, fy]) => over.some(o => has(o.bounds, at(fx!, fy!))))) {
-    throw new MobiusError('ELEMENT_NOT_FOUND', `${e.id} is covered by ${over.map(o => o.label || o.text || o.role).slice(0, 2).join(', ')}`, { hint: 'Scroll it into view, observe, then tap.' });
+  if (covered(mid)) {
+    const by = [...over.filter(o => has(o.bounds, mid)).map(o => o.label || o.text || o.role), ...(keyboard && has(keyboard, mid) ? ['the keyboard'] : [])];
+    throw new MobiusError('ELEMENT_NOT_FOUND', `${e.id} is covered by ${by.slice(0, 2).join(', ')}`, { hint: by.includes('the keyboard') ? 'Hide the keyboard (mobius_hide_keyboard), observe, then tap.' : 'Scroll it into view, observe, then tap.' });
   }
-  return mid; // fully covered by its own children: the children are the target in practice
+  return mid; // covered only by its own children: the children are the target in practice
 };
 
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
@@ -98,11 +102,16 @@ export class DeviceSession {
   readonly connector: Connector;
   readonly store: ObservationStore;
   /** The observation last shown to the agent (observe / list / snapshot): short refs like @e5 point into it, not into internal polls. */
-  shown: string | null = null;
+  get shown() { return this.store.shown; }
+  set shown(id: string | null) { this.store.shown = id; }
   private readonly audit: AuditLog;
   private readonly policy: Policy;
   private readonly approver: Approver;
   private queue: Promise<unknown> = Promise.resolve();
+  /** Device work that outlived its action's timeout: the next action waits for it (no tap while typing still runs). */
+  private inflight: Promise<unknown> = Promise.resolve();
+  /** Set when an audit write failed: every later action is refused (no unaudited actions). */
+  private auditBroken: string | null = null;
   private recent: { key: string; changed: boolean | null }[] = [];
   private readonly plane: PlaneContext;
   private verdict: Verdict | null = null;
@@ -118,14 +127,45 @@ export class DeviceSession {
 
   isBlockedApp(app: string | null) { return this.policy.appBlocked(app); }
 
+  /** Who is asking may act at all: a rejected, revoked or expired session can't read the screen either. */
+  checkAgent() {
+    const pl = this.plane;
+    const ses = pl.session();
+    if (ses && 'invalid' in ses) throw new MobiusError('POLICY_BLOCKED', `Agent session token rejected: ${ses.invalid}`, { hint: 'Ask the operator for a fresh session token.' });
+    if (!ses && pl.require_session) throw new MobiusError('POLICY_BLOCKED', 'This Mobius requires a signed agent session', { hint: 'Ask the operator for a session token (mobius session issue).' });
+    if (ses && isRevoked(ses.jti)) throw new MobiusError('POLICY_BLOCKED', 'Agent session revoked by the operator', { hint: 'Stop and tell the user.' });
+    if (ses && ses.exp <= Date.now() / 1000) throw new MobiusError('POLICY_BLOCKED', 'Agent session expired', { hint: 'Ask the operator for a fresh session token.' });
+    if (ses?.policy_version && ses.policy_version !== this.policy.config.version) {
+      throw new MobiusError('POLICY_BLOCKED', `Session was issued for policy ${ses.policy_version}, but Mobius runs ${this.policy.config.version}`, { hint: 'The operator must re-issue the session for the current policy.' });
+    }
+    if (pl.max_minutes && Date.now() - pl.started > pl.max_minutes * 60_000) throw new MobiusError('POLICY_BLOCKED', `Session time limit reached (${pl.max_minutes} min)`, { hint: 'Stop and report progress to the user.' });
+  }
+
+  /** Kill switch, audit health and the agent's session, for every gated action; the quota for state changes. */
+  private checkPlane(mutating: boolean) {
+    if (existsSync(killSwitchPath())) throw new MobiusError('POLICY_BLOCKED', 'Kill switch engaged: all agent actions are stopped', { hint: 'A human ran `mobius stop`. Stop and tell the user.' });
+    if (this.auditBroken) throw new MobiusError('POLICY_BLOCKED', `Audit log unavailable (${this.auditBroken}), so actions are refused`, { hint: 'Tell the user: the audit database needs attention.' });
+    this.checkAgent();
+    const pl = this.plane;
+    if (mutating && pl.actions >= pl.max_actions) throw new MobiusError('POLICY_BLOCKED', `Action quota reached (${pl.max_actions} per session)`, { hint: 'Stop and report progress to the user.' });
+  }
+
+  /** Where the finger lands for an element on the latest screen (on screen, off overlays and the keyboard). */
+  pointOf(el: Element) {
+    const l = this.store.latest();
+    return center(el, l?.elements, l?.screen, l?.keyboard);
+  }
+
   /** Policy + approval gate. Returns the (re-resolved) target to act on. Throws MobiusError to stop. */
   private async gate(tool: string, guard: Guard): Promise<Element | null> {
     // Time of check = time of use: the app may have changed the screen since the agent read it ("Add to cart" becomes
     // "Pay ₹999"). Re-read now and decide on what the finger will actually hit. A changed target is refused as stale.
-    if (guard.ctx.mutating && (guard.targetId || guard.point)) await this.observe();
+    // Reads re-read too: a read is judged on the app in front now (a banking app may have opened since the last look).
+    this.checkPlane(guard.ctx.mutating);
+    if (!guard.ctx.mutating || guard.targetId || guard.point) await this.observe();
     const latest = this.store.latest();
     let target = guard.targetId ? this.store.resolve(guard.targetId) : guard.point ? this.elementAt(guard.point.x, guard.point.y) : null;
-    const p = guard.point ?? (target ? center(target, latest?.elements, latest?.screen) : null);
+    const p = guard.point ?? (target ? this.pointOf(target) : null);
     const under = p ? this.elementsAt(p.x, p.y) : [];
     // Pixels, not just labels: on a screen showing an amount due, read the text actually drawn where the finger lands
     // (OCR), so a Pay button can't hide behind an accessibility label that says "Close".
@@ -140,20 +180,6 @@ export class DeviceSession {
         if (hit && t.text) under.push(drawnText(String(t.text), { x, y, width: w, height: h }));
       }
     }
-    if (guard.ctx.mutating) {
-      if (existsSync(killSwitchPath())) throw new MobiusError('POLICY_BLOCKED', 'Kill switch engaged: all agent actions are stopped', { hint: 'A human ran `mobius stop`. Stop and tell the user.' });
-      const pl = this.plane;
-      if (pl.actions >= pl.max_actions) throw new MobiusError('POLICY_BLOCKED', `Action quota reached (${pl.max_actions} per session)`, { hint: 'Stop and report progress to the user.' });
-      const ses = pl.session();
-      if (ses && 'invalid' in ses) throw new MobiusError('POLICY_BLOCKED', `Agent session token rejected: ${ses.invalid}`, { hint: 'Ask the operator for a fresh session token.' });
-      if (!ses && pl.require_session) throw new MobiusError('POLICY_BLOCKED', 'This Mobius requires a signed agent session', { hint: 'Ask the operator for a session token (mobius session issue).' });
-      if (ses && isRevoked(ses.jti)) throw new MobiusError('POLICY_BLOCKED', 'Agent session revoked by the operator', { hint: 'Stop and tell the user.' });
-      if (ses && ses.exp <= Date.now() / 1000) throw new MobiusError('POLICY_BLOCKED', 'Agent session expired', { hint: 'Ask the operator for a fresh session token.' });
-      if (ses?.policy_version && ses.policy_version !== this.policy.config.version) {
-        throw new MobiusError('POLICY_BLOCKED', `Session was issued for policy ${ses.policy_version}, but Mobius runs ${this.policy.config.version}`, { hint: 'The operator must re-issue the session for the current policy.' });
-      }
-      if (pl.max_minutes && Date.now() - pl.started > pl.max_minutes * 60_000) throw new MobiusError('POLICY_BLOCKED', `Session time limit reached (${pl.max_minutes} min)`, { hint: 'Stop and report progress to the user.' });
-    }
     const v = this.policy.evaluate({ ...guard.ctx, tool, app: latest?.foreground_app ?? null, target, screen: latest?.elements, under });
     this.verdict = v;
     const { decision, reason, action_class } = v;
@@ -163,10 +189,12 @@ export class DeviceSession {
     const outcome = await this.approver.request(req, this.policy.config.approval_timeout_s);
     if (outcome === 'rejected') throw new MobiusError('APPROVAL_REJECTED', `User rejected: ${req.summary}`, { hint: 'Do not retry. Ask the user what they want instead.' });
     if (outcome === 'expired') throw new MobiusError('APPROVAL_EXPIRED', `No decision within ${this.policy.config.approval_timeout_s}s: ${req.summary}`, { retryable: true });
-    // Time passed while the human decided: confirm the approved target is still the one on screen.
-    if (guard.targetId) {
+    // Time passed while the human decided (up to minutes): the operator may have stopped Mobius or revoked the agent,
+    // and the screen may have moved. Re-check, and confirm what the finger will hit is still what was approved.
+    this.checkPlane(guard.ctx.mutating);
+    if (guard.targetId || guard.point) {
       await this.observe();
-      target = this.store.resolve(guard.targetId);
+      target = guard.targetId ? this.store.resolve(guard.targetId) : this.elementAt(guard.point!.x, guard.point!.y);
       if (guard.describe(target) !== req.summary) {
         throw new MobiusError('STALE_ELEMENT', 'Screen changed after approval; the approved target is no longer the same', { retryable: true, hint: 'Observe again; a new approval will be requested.' });
       }
@@ -177,7 +205,7 @@ export class DeviceSession {
   /** Serialize work per device: one action at a time, no interleaved taps. */
   private exclusive<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.queue.then(fn, fn);
-    this.queue = next.catch(() => undefined);
+    this.queue = next.catch(() => undefined).then(() => this.inflight);
     return next;
   }
 
@@ -236,7 +264,7 @@ export class DeviceSession {
     if (element_id) {
       const el = this.store.resolve(element_id);
       if (!el.enabled) throw new MobiusError('ELEMENT_NOT_FOUND', `${element_id} is disabled`, { hint: 'Wait for it to enable or pick another element.' });
-      return { ...center(el, this.store.latest()?.elements, this.store.latest()?.screen), el };
+      return { ...this.pointOf(el), el };
     }
     if (x !== undefined && y !== undefined) {
       const s = this.store.latest()?.screen;
@@ -276,10 +304,14 @@ export class DeviceSession {
         const target = opts.guard ? await this.gate(tool, opts.guard) : null;
         if (opts.guard?.ctx.mutating) this.plane.actions++;
         preHash = this.store.latest()?.screen_hash ?? preHash;
-        const message = await withTimeout(exec(target), opts.timeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS, tool);
+        const work = exec(target);
+        this.inflight = work.catch(() => undefined);
+        const message = await withTimeout(work, opts.timeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS, tool);
         const verifying = !!opts.expect || !!opts.check;
         const deadline = Date.now() + (verifying ? opts.verifyMs ?? DEFAULT_EXPECT_TIMEOUT_MS : 2_500);
-        let obs = await this.settle(Math.min(deadline, Date.now() + 2_500), preHash);
+        // A read changes nothing: no need to wait for the screen to settle (that costs the settle grace window).
+        const read = opts.guard && !opts.guard.ctx.mutating && !verifying;
+        let obs = read ? this.store.latest() ?? await this.observe() : await this.settle(Math.min(deadline, Date.now() + 2_500), preHash);
         let verified: boolean | null = null;
         let why = '';
         const evaluate = (o: Observation) => {
@@ -331,7 +363,10 @@ export class DeviceSession {
           action_class: this.verdict?.action_class ?? null, amount: this.verdict?.amount ?? null,
         });
       } catch (e) {
-        process.stderr.write(JSON.stringify({ level: 'error', msg: 'audit write failed', err: String(e) }) + '\n');
+        // Fail closed: this action already ran, so report it, but nothing more happens without an audit trail.
+        this.auditBroken = String(e).slice(0, 200);
+        process.stderr.write(JSON.stringify({ level: 'error', msg: 'audit write failed; refusing further actions', err: String(e) }) + '\n');
+        result = { ...result, message: `${result.message} (warning: the audit write failed, so Mobius refuses further actions)` };
       }
       return result;
     });

@@ -291,7 +291,8 @@ test('quota: actions beyond the session limit are refused', async () => {
 
 test('secrets vault: secret_ref is typed but never returned or logged', async () => {
   process.env.MOBIUS_TEST_SECRET = 'hunter2-pass';
-  const { fake, call, audit } = await setup('approved');
+  process.env.MOBIUS_SECRETS = 'env:MOBIUS_TEST_SECRET';
+  const { fake, call, audit, approver } = await setup('approved');
   const obs = await call('observe');
   const r = await call('type', { element_id: obs.elements.find((e: any) => e.label === 'Name').id, secret_ref: 'env:MOBIUS_TEST_SECRET' });
   assert.equal(r.ok, true);
@@ -299,5 +300,11 @@ test('secrets vault: secret_ref is typed but never returned or logged', async ()
   assert.doesNotMatch(JSON.stringify(r), /hunter2/);
   assert.doesNotMatch(JSON.stringify(audit.recent()), /hunter2/);
   assert.equal((await call('type', { text: 'a', secret_ref: 'env:X' })).error.code, 'INVALID_INPUT', 'exactly one of text / secret_ref');
-  delete process.env.MOBIUS_TEST_SECRET;
+  assert.match(approver.requests.at(-1)?.summary ?? '', /env:MOBIUS_TEST_SECRET/, 'the human sees which secret');
+  // A secret the operator did not list can't be typed (and read back from a plain field).
+  process.env.MOBIUS_APPROVAL_TOKEN_TEST = 'tok-123';
+  const r2 = await call('type', { element_id: obs.elements.find((e: any) => e.label === 'Name').id, secret_ref: 'env:MOBIUS_APPROVAL_TOKEN_TEST' });
+  assert.equal(r2.error.code, 'POLICY_BLOCKED');
+  assert.ok(!fake.typed.includes('tok-123'));
+  delete process.env.MOBIUS_TEST_SECRET; delete process.env.MOBIUS_SECRETS; delete process.env.MOBIUS_APPROVAL_TOKEN_TEST;
 });

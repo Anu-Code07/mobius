@@ -65,8 +65,16 @@ function fail(e: unknown) {
 
 const actionOut = (r: ActionResult) => ({ ...json(r), structuredContent: r as unknown as Record<string, unknown>, ...(r.ok ? {} : { isError: true }) });
 
-/** env:NAME → process env; keychain:service[/account] → macOS Keychain (generic password). */
+/**
+ * env:NAME → process env; keychain:service[/account] → macOS Keychain (generic password).
+ * Only refs the operator listed in MOBIUS_SECRETS (comma-separated) can be typed: an agent must not be able to type
+ * MOBIUS_APPROVAL_TOKEN or a cloud key into a search box and read it back.
+ */
 async function resolveSecret(ref: string): Promise<string> {
+  const allowed = (process.env.MOBIUS_SECRETS ?? '').split(',').map(r => r.trim()).filter(Boolean);
+  if (!allowed.includes(ref)) {
+    throw new MobiusError('POLICY_BLOCKED', `secret ${ref} is not one the operator allowed agents to type`, { hint: 'Ask the user to add it to MOBIUS_SECRETS in the MCP server environment.' });
+  }
   const [kind, rest] = [ref.slice(0, ref.indexOf(':')), ref.slice(ref.indexOf(':') + 1)];
   if (kind === 'env') {
     const v = process.env[rest];
@@ -123,6 +131,7 @@ export function createServer(mobius: Mobius): McpServer {
     annotations: { readOnlyHint: true },
   }, safe(async ({ device_id, screenshot, max_size }) => {
     const s = await mobius.session(device_id);
+    s.checkAgent();
     const obs = await s.observe();
     if (s.isBlockedApp(obs.foreground_app)) return json(blockedView(obs));
     s.shown = obs.observation_id;
@@ -149,16 +158,24 @@ export function createServer(mobius: Mobius): McpServer {
   }, safe(async ({ device_id, text_visible, text_gone, app, timeout_ms }) => {
     if (!text_visible && !text_gone && !app) throw new MobiusError('INVALID_INPUT', 'Give text_visible, text_gone or app');
     const s = await mobius.session(device_id);
+    s.checkAgent();
     const deadline = Date.now() + (timeout_ms ?? 10_000);
     const gone = (o: Observation) => !text_gone || !o.elements.some(e => (e.text ?? '').includes(text_gone) || (e.label ?? '').includes(text_gone));
-    let obs = await s.observe();
+    // A blocked app's screen is not shared, not even as a yes/no about its text.
+    const peek = async () => {
+      const o = await s.observe();
+      if ((text_visible || text_gone) && s.isBlockedApp(o.foreground_app)) throw new MobiusError('POLICY_BLOCKED', `${o.foreground_app} is blocked by Mobius policy; its screen is not shared`, { hint: 'Press home/back to leave, or ask the user to do this step.' });
+      return o;
+    };
+    let obs = await peek();
     while (!(expectationMet(obs, { ...(text_visible ? { text_visible } : {}), ...(app ? { app } : {}) }) && gone(obs))) {
       if (Date.now() > deadline) {
         throw new MobiusError('TIMEOUT', `Condition not met within ${timeout_ms ?? 10_000} ms`, {
           retryable: true, hint: `Last screen: ${obs.observation_id}, app ${obs.foreground_app}. Call observe to inspect.`,
         });
       }
-      obs = await s.observe();
+      await new Promise(r => setTimeout(r, 100));
+      obs = await peek();
     }
     return json({ met: true, observation: s.isBlockedApp(obs.foreground_app) ? blockedView(obs) : compactObservation(obs) });
   }));
@@ -190,7 +207,7 @@ export function createServer(mobius: Mobius): McpServer {
     const point = target.el ? undefined : { x: target.x, y: target.y };
     const verb = m === 'single' ? 'Tapped' : m === 'long' ? 'Long-pressed' : 'Double-tapped';
     return actionOut(await s.run('tap', audit, async fresh => {
-      const p = fresh && element_id ? centerOf(fresh, s.store.latest()?.elements) : { x: target.x, y: target.y };
+      const p = fresh && element_id ? s.pointOf(fresh) : { x: target.x, y: target.y };
       await s.connector.tap(p.x, p.y, m);
       return `${verb} ${fresh ? name(fresh) : `(${Math.round(p.x)}, ${Math.round(p.y)})`}`;
     }, { expect, timeoutMs: timeout_ms, guard: { ctx: { tool: 'tap', mutating: true, coordinate: !element_id }, targetId, point, describe: el => `${m} tap on ${name(el)}` } }));
@@ -216,12 +233,19 @@ export function createServer(mobius: Mobius): McpServer {
     const s = await mobius.session(device_id);
     const audit = { element_id, length: text.length, submit: !!submit, ...(secret_ref ? { secret_ref } : {}) };
     let field: Element | null = null;
+    let secretOnScreen = false;
     try {
+      if (!element_id) {
+        // Which field gets the text is decided on the screen now, not on a read from before the last action.
+        const o = await s.observe();
+        secretOnScreen = o.elements.some(e => e.editable && e.sensitive);
+      }
       field = element_id ? s.resolveTarget(element_id, undefined, undefined).el : s.focusedField();
       if (element_id && field && !field.editable) throw new MobiusError('INVALID_INPUT', `${element_id} is not an editable field`);
     } catch (e) { return actionOut(await s.run('type', audit, () => Promise.reject(e))); }
-    const secret = !!field?.sensitive || !!secret_ref;
-    const shown = secret ? `${text.length} secret characters` : JSON.stringify(text.length > 120 ? `${text.slice(0, 120)}…` : text);
+    // Fail closed: no field reports focus (iOS secure fields often don't) but a secret field is on screen: it may get it.
+    const secret = !!field?.sensitive || !!secret_ref || (!field && secretOnScreen);
+    const shown = secret_ref ? `secret ${secret_ref} (${text.length} characters)` : secret ? `${text.length} secret characters` : JSON.stringify(text.length > 120 ? `${text.slice(0, 120)}…` : text);
     // Typed text must actually land: compare letters/digits, ignoring formatting (masks, spacing).
     const norm = (v: string) => v.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
     const appBefore = s.store.latest()?.foreground_app ?? null;
@@ -245,7 +269,7 @@ export function createServer(mobius: Mobius): McpServer {
     };
     return actionOut(await s.run('type', audit, async fresh => {
       if (element_id && fresh) {
-        const p = centerOf(fresh, s.store.latest()?.elements);
+        const p = s.pointOf(fresh);
         await s.connector.tap(p.x, p.y, 'single');
         await s.waitForFocus(p.x, p.y); // typing before focus drops the first characters
       }
@@ -253,7 +277,7 @@ export function createServer(mobius: Mobius): McpServer {
         await s.connector.type(text, !!submit);
       } catch (e) {
         // Safe retry: only if a fresh read proves nothing was typed (field identity, incl. its text, unchanged).
-        if (!field || field.sensitive || !(e instanceof MobiusError) || !['TIMEOUT', 'INTERNAL'].includes(e.code)) throw e;
+        if (!field || field.sensitive || !(e instanceof MobiusError) || !['TIMEOUT', 'INTERNAL', 'OUTCOME_UNKNOWN'].includes(e.code)) throw e;
         await s.observe();
         let unchanged = false;
         try { unchanged = s.store.resolve(field.id).text === field.text; } catch { /* changed or gone */ }
@@ -264,7 +288,8 @@ export function createServer(mobius: Mobius): McpServer {
       }
       return `Typed ${text.length} characters${submit ? ' and submitted' : ''}`;
     }, {
-      expect, timeoutMs: timeout_ms, check: submit ? undefined : landed,
+      // Long text takes time on a device (WebDriverAgent types a few characters per tick).
+      expect, timeoutMs: timeout_ms ?? Math.max(20_000, 10_000 + text.length * 100), check: submit ? undefined : landed,
       guard: { ctx: { tool: 'type', mutating: true, secretField: secret, submit: !!submit }, targetId: field?.id, describe: el => `type ${shown} into ${name(el)}${submit ? ' and submit' : ''}` },
     }));
   }));
@@ -301,7 +326,8 @@ export function createServer(mobius: Mobius): McpServer {
     return actionOut(await s.run('scroll', { direction, element_id },
       async () => { await s.connector.swipe(finger, from, distance); return `Scrolled ${direction}`; },
       // A scroll on a specific element is a gesture on it (a "slide to pay" track is scrollable): check it like a swipe.
-      { expect, timeoutMs: timeout_ms, guard: { ctx: { tool: 'scroll', mutating: !!element_id }, targetId: element_id ? s.store.resolve(element_id).id : undefined, describe: el => `scroll ${direction}${el ? ` on ${name(el)}` : ''}` } }));
+      // Every scroll is a gesture: kill switch, session and quota apply; a sideways one is judged like a swipe ("slide to pay").
+      { expect, timeoutMs: timeout_ms, guard: { ctx: { tool: 'scroll', mutating: true, horizontal: direction === 'left' || direction === 'right' }, targetId: element_id ? s.store.resolve(element_id).id : undefined, describe: el => `scroll ${direction}${el ? ` on ${name(el)}` : ''}` } }));
   }));
 
   reg('swipe', {
@@ -336,8 +362,9 @@ export function createServer(mobius: Mobius): McpServer {
     const nav = key !== 'enter';
     return actionOut(await s.run('press_key', { key }, async () => { await s.connector.key(key); return `Pressed ${key}`; }, {
       expect, timeoutMs: timeout_ms,
-      // Navigation keys stay allowed even inside blocked apps, so the agent can always leave.
-      ...(nav ? {} : { guard: { ctx: { tool: 'press_key', mutating: true, submit: true }, describe: () => 'press Enter (may submit/send)' } }),
+      // Navigation keys stay allowed even inside blocked apps, so the agent can always leave (kill switch still applies).
+      guard: nav ? { ctx: { tool: 'press_key', mutating: true, nav: true }, describe: () => `press ${key}` }
+        : { ctx: { tool: 'press_key', mutating: true, submit: true }, describe: () => 'press Enter (may submit/send)' },
     }));
   }));
 
@@ -369,7 +396,7 @@ export function createServer(mobius: Mobius): McpServer {
     const shown = url.split('?')[0]!;
     return actionOut(await s.run('open_url', { url: shown },
       async () => { await s.connector.openUrl(url); return `Opened ${shown}`; },
-      { expect, timeoutMs: timeout_ms, guard: { ctx: { tool: 'open_url', mutating: true, url }, describe: () => `open ${shown}` } }));
+      { expect, timeoutMs: timeout_ms, guard: { ctx: { tool: 'open_url', mutating: true, url }, describe: () => `open ${url.length > 300 ? `${url.slice(0, 300)}…` : url}` } }));
   }));
 
   registerMobiusTools(server, handlers, mobius, { safe, json, actionOut });

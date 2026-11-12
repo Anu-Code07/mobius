@@ -64,7 +64,8 @@ export class AuditLog {
   /** Public keys that may have signed this log, oldest first. */
   readonly keyring: () => string[];
   constructor(path = process.env.MOBIUS_DB ?? defaultPath(), signer?: Signer) {
-    this.db = new DatabaseSync(path);
+    // Two Mobius processes (two agent sessions, or mcp + serve) share this file: wait for the other writer, don't fail.
+    this.db = new DatabaseSync(path, { timeout: 5_000 });
     const install = !signer && path !== ':memory:';
     this.signer = signer ?? (install ? installSigner(mobiusHome()) : ephemeralSigner());
     this.keyring = install ? () => installKeyring(mobiusHome()) : () => [this.signer.publicKeyPem];
@@ -77,6 +78,12 @@ export class AuditLog {
   }
 
   record(e: AuditEntry) {
+    // Read the chain head and append in one write transaction, so two processes can't both chain onto the same row.
+    this.db.exec('BEGIN IMMEDIATE');
+    try { this.append(e); this.db.exec('COMMIT'); } catch (err) { this.db.exec('ROLLBACK'); throw err; }
+  }
+
+  private append(e: AuditEntry) {
     const prev = this.db.prepare('SELECT hash FROM actions WHERE hash IS NOT NULL ORDER BY rowid DESC LIMIT 1').get() as { hash: string } | undefined;
     const r: Row = {
       action_id: e.action_id, ts: new Date().toISOString(), device_id: e.device_id, tool: e.tool, params: JSON.stringify(e.params),

@@ -96,6 +96,10 @@ export interface PolicyContext {
   targetApp?: string;
   /** Tap given as x,y rather than an element id. */
   coordinate?: boolean;
+  /** Back / home / recents: always allowed, even inside a blocked app, so the agent can leave. */
+  nav?: boolean;
+  /** A sideways scroll: the same finger motion as a "slide to pay" swipe. */
+  horizontal?: boolean;
   /** Everything on the current screen, for context rules (checkout screens raise risk). */
   screen?: Element[];
   /** Every element under the tap point (an overlay may sit on top of the real button). */
@@ -207,10 +211,14 @@ export class Policy {
     const amount = decl?.amount ?? amountInvolved(t, ctx.screen);
     let v: Verdict = { ...base, action_class: cls, rule_id: base.rule_id, amount };
     if (base.decision !== 'blocked' && ctx.mutating) {
+      // A ceiling rule ("allow payments up to ₹200") is checked against the largest amount on screen too: a label
+      // saying "Pay ₹1" must not unlock a ₹50,000 checkout.
+      const shown = (ctx.screen ?? []).flatMap(e => [...`${e.text ?? ''} ${e.label ?? ''}`.matchAll(/(?:₹|rs\.?|inr|\$|€|£)\s?([\d,]+(?:\.\d+)?)/gi)].map(m => Number(m[1]!.replace(/,/g, ''))));
+      const ceiling = amount === null ? null : Math.max(amount, ...shown);
       const r = this.config.rules.find(r =>
         (!r.app || appRe([r.app])!.test(ctx.app ?? '')) && (!r.tool || r.tool.includes(ctx.tool))
         && (!r.action_class || r.action_class.includes(cls)) && (!r.target || new RegExp(r.target, 'i').test(words))
-        && (r.max_amount === undefined || (amount !== null && amount <= r.max_amount)));
+        && (r.max_amount === undefined || (ceiling !== null && ceiling <= r.max_amount)));
       if (r) v = { ...v, decision: r.effect, reason: `rule ${r.id}${r.description ? `: ${r.description}` : ''} (was: ${base.reason})`, rule_id: r.id };
     }
     if (this.config.dry_run && v.decision === 'approval_required') v = { ...v, decision: 'allow', reason: `dry run, would ask: ${v.reason}`, dry_run: true };
@@ -220,6 +228,7 @@ export class Policy {
   private builtin(ctx: PolicyContext): Verdict {
     const out = (decision: Decision, reason: string, action_class: ActionClass = 'unknown', rule_id = `builtin.${decision}`): Verdict => ({ decision, reason, action_class, rule_id });
     if (this.appBlocked(ctx.targetApp ?? null)) return out('blocked', `${ctx.targetApp} is in a blocked app category (finance/credentials)`);
+    if (ctx.nav) return out('allow', 'navigation key');
     if (this.appBlocked(ctx.app)) return out('blocked', `${ctx.app} is in a blocked app category (finance/credentials)`);
     if (!ctx.mutating) return out('allow', 'read-only');
     if (ctx.url && /^(intent|file|content|javascript|data):/i.test(ctx.url)) return out('blocked', 'URL scheme not allowed');
@@ -231,7 +240,8 @@ export class Policy {
     }
     if (ctx.secretField) return out(this.config.secret_entry, 'typing into a password/PIN/OTP field', 'secret');
     const t = ctx.target;
-    const wordsOf = (e: Element) => readable(`${e.text ?? ''} ${e.label ?? ''} ${e.resource_id ?? ''}`).replace(/[_.]/g, ' ');
+    // camelCase ids split into words: btnPayNow, placeOrderButton.
+    const wordsOf = (e: Element) => readable(`${e.text ?? ''} ${e.label ?? ''} ${e.resource_id ?? ''}`).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_.]/g, ' ');
     const words = t ? wordsOf(t) : '';
     const gesture = ctx.tool === 'tap' || ctx.tool === 'swipe' || ctx.tool === 'scroll';
     // Layer 0: the app itself declared this control sensitive. Trust the app over any label.
@@ -265,6 +275,7 @@ export class Policy {
       device_setting_write: ['changing a system setting', 'account'],
       set_permission: ['changing an app permission', 'permission'],
       start_screen_recording: ['recording the screen (video cannot be masked)', 'secret'],
+      record_flow_start: ["recording the user's own taps (it can capture a PIN or unlock pattern)", 'secret'],
       reboot_device: ['rebooting the device', 'unknown'],
     };
     const power = POWER[ctx.tool];
@@ -282,7 +293,7 @@ export class Policy {
     }
     // Layer 4: a swipe on a screen that offers "slide to …" commits. Sliders that only navigate ("Slide to switch" gender
     // toggle on Slikk, live run) don't count; any other verb, or none we can read, still asks (fail closed).
-    if (ctx.tool === 'swipe' && ctx.screen?.some(e => { const m = /\b(?:slide|swipe) to\b\s*(\p{L}*)/iu.exec(wordsOf(e)); return !!m && !NAV_SLIDER.test(m[1]!); })) {
+    if ((ctx.tool === 'swipe' || (ctx.tool === 'scroll' && ctx.horizontal)) && ctx.screen?.some(e => { const m = /\b(?:slide|swipe) to\b\s*(\p{L}*)/iu.exec(wordsOf(e)); return !!m && !NAV_SLIDER.test(m[1]!); })) {
       return out('approval_required', 'swipe on a screen with a "slide to …" control (swipe-to-pay/book)', 'payment');
     }
     if (ctx.submit) return out(this.config.submit, 'submitting text (may send a message or form)', 'send');

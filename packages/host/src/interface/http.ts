@@ -29,7 +29,8 @@ const send = (res: ServerResponse, code: number, body: unknown, type = 'applicat
   res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' });
   res.end(typeof body === 'string' ? body : JSON.stringify(body));
 };
-const sameToken = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+// Compare bytes, not characters: equal-length strings with different UTF-8 sizes would make timingSafeEqual throw.
+const sameToken = (a: string, b: string) => { const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && timingSafeEqual(x, y); };
 
 export function createHttpServer(engine: Engine, audit: AuditLog, token: string, sessionKey?: string) {
   if (!token || token.length < 16) throw new Error('MOBIUS_API_TOKEN must be at least 16 characters');

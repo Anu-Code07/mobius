@@ -1,6 +1,6 @@
 // Execution: the Mobius device driver (drivers/mobiusagent-driver, Rust). One long-lived process speaks JSON lines over stdio.
 // Android: stock adb + an on-device helper. iOS: WebDriverAgent over usbmuxd (once built with ios-agent/setup.sh).
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -27,22 +27,25 @@ export const iosAgentReady = () => {
 export interface AgentDevice { id: string; platform: 'android' | 'ios'; type: 'emulator' | 'simulator' | 'real'; name: string; model: string; version: string; state: string }
 
 export class MobiusAgentDriver {
-  private proc: ChildProcessWithoutNullStreams | null = null;
+  private proc: ChildProcess | null = null;
   private next = 1;
   private waiting = new Map<number, { ok: (v: any) => void; fail: (e: Error) => void }>();
 
   private start() {
-    const p = spawn(driverPath(), [], { stdio: ['pipe', 'pipe', 'pipe'] });
-    createInterface({ input: p.stdout }).on('line', line => {
+    // stderr is not read: a full pipe would stall the driver.
+    const p = spawn(driverPath(), [], { stdio: ['pipe', 'pipe', 'ignore'] });
+    // Every call in flight when the driver dies (killed after a timeout, crashed) may or may not have reached the device.
+    const failAll = (e: MobiusError) => { for (const w of this.waiting.values()) w.fail(e); this.waiting.clear(); if (this.proc === p) this.proc = null; };
+    // A binary that can't start (missing, not executable) must not crash the server.
+    p.on('error', e => failAll(new MobiusError('INTERNAL', `mobiusagent-driver could not run: ${e.message}`)));
+    p.stdin!.on('error', () => { /* EPIPE to a driver that just died: 'exit' fails its calls */ });
+    createInterface({ input: p.stdout! }).on('line', line => {
       let r: any; try { r = JSON.parse(line); } catch { return; }
       const w = this.waiting.get(r.id); if (!w) return;
       this.waiting.delete(r.id);
       r.ok ? w.ok(r.data) : w.fail(new MobiusError('INTERNAL', String(r.error)));
     });
-    p.on('exit', () => {
-      for (const w of this.waiting.values()) w.fail(new MobiusError('INTERNAL', 'mobiusagent-driver exited', { retryable: true }));
-      this.waiting.clear(); this.proc = null;
-    });
+    p.on('exit', () => failAll(new MobiusError('OUTCOME_UNKNOWN', 'mobiusagent-driver exited during the call; it may or may not have happened', { retryable: true, hint: 'Call observe before retrying.' })));
     this.proc = p;
     return p;
   }
@@ -55,10 +58,10 @@ export class MobiusAgentDriver {
       const t = setTimeout(() => {
         this.waiting.delete(id);
         // ponytail: a wedged adb call blocks the one driver process; restart it rather than queue behind it.
-        this.proc?.kill(); fail(new MobiusError('TIMEOUT', `mobiusagent-driver ${op} timed out`, { retryable: true }));
+        this.proc?.kill(); fail(new MobiusError('OUTCOME_UNKNOWN', `mobiusagent-driver ${op} did not answer within ${timeoutMs} ms; it may or may not have happened`, { retryable: true, hint: 'Call observe before retrying.' }));
       }, timeoutMs);
       this.waiting.set(id, { ok: v => { clearTimeout(t); ok(v); }, fail: e => { clearTimeout(t); fail(e); } });
-      p.stdin.write(JSON.stringify({ id, op, ...args }) + '\n');
+      p.stdin!.write(JSON.stringify({ id, op, ...args }) + '\n');
     });
   }
 
@@ -66,7 +69,15 @@ export class MobiusAgentDriver {
   close() { this.proc?.kill(); this.proc = null; }
 }
 
-const KEYS: Partial<Record<Key, string>> = { back: 'back', home: 'home', recents: 'recents', enter: 'enter' };
+const KEYS: Record<Key, string> = { back: 'back', home: 'home', recents: 'recents', enter: 'enter', notifications: 'notifications' };
+
+/** How long a driver op may take: sessions (`seconds`), routes, installs, waits and the first OCR build get their own budget. */
+export function extraTimeoutMs(op: string, args: Record<string, unknown> = {}) {
+  const secs = Number(args.seconds ?? 0);
+  return op === 'gps_route' ? 3_700_000 : op === 'install' ? 300_000
+    : ['perf_report', 'watch_crashes'].includes(op) ? (secs + 120) * 1000 : ['ocr', 'bug_report', 'replay'].includes(op) ? 180_000
+    : op === 'wait_idle' ? Number(args.timeout_ms ?? 5000) + 30_000 : 60_000;
+}
 
 export class MobiusAgentConnector implements Connector {
   readonly platform: 'android' | 'ios';
@@ -98,7 +109,9 @@ export class MobiusAgentConnector implements Connector {
 
   async dump(): Promise<RawScreen> {
     const r = await this.drv.call<{ tree: { hierarchy: any[] }; width: number; height: number; rotation: number; foregroundApp: string | null }>('dump', this.d).catch(e => {
-      throw new MobiusError('DEVICE_LOCKED', `Could not read the screen: ${(e as Error).message}`, { retryable: true, hint: 'Ask the user to wake and unlock the phone.' });
+      const msg = (e as Error).message;
+      if (/\block(ed)?\b|unlock|passcode/i.test(msg)) throw new MobiusError('DEVICE_LOCKED', `Could not read the screen: ${msg}`, { retryable: true, hint: 'Ask the user to wake and unlock the phone.' });
+      throw new MobiusError('DEVICE_OFFLINE', `Could not read the screen: ${msg}`, { retryable: true, hint: this.platform === 'ios' ? 'Check the device is connected and WebDriverAgent is running (mobius setup-ios).' : 'Check the device is connected (adb devices).' });
     });
     this.size = { width: r.width, height: r.height };
     const root: RawNode = { cls: 'hierarchy', pkg: '', text: '', desc: '', resourceId: '', clickable: false, longClickable: false,
@@ -135,7 +148,7 @@ export class MobiusAgentConnector implements Connector {
 
   async key(key: Key) {
     const k = KEYS[key];
-    if (!k || (this.platform === 'ios' && (key === 'back' || key === 'recents'))) throw new MobiusError('UNSUPPORTED_CAPABILITY', `Key "${key}" is not available on this device`);
+    if (!k || (this.platform === 'ios' && key !== 'home' && key !== 'enter')) throw new MobiusError('UNSUPPORTED_CAPABILITY', `Key "${key}" is not available on this device`);
     await this.drv.call('key', { ...this.d, key: k });
   }
 
@@ -152,10 +165,6 @@ export class MobiusAgentConnector implements Connector {
   async openUrl(url: string) { await this.drv.call('url', { ...this.d, url }); }
   async listApps() { return (await this.drv.call<{ apps: string[] }>('apps', this.d)).apps; }
   async extra(op: string, args: Record<string, unknown> = {}) {
-    // Long-running ops get their own budget: sessions (`seconds`), routes, installs, first OCR build.
-    const secs = Number(args.seconds ?? 0);
-    const timeout = op === 'gps_route' ? 3_700_000 : op === 'install' ? 300_000
-      : ['perf_report', 'watch_crashes'].includes(op) ? (secs + 120) * 1000 : ['ocr', 'bug_report', 'replay'].includes(op) ? 180_000 : 60_000;
-    return this.drv.call(op, { ...this.d, ...args }, timeout);
+    return this.drv.call(op, { ...this.d, ...args }, extraTimeoutMs(op, args));
   }
 }

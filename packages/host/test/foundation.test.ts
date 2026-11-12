@@ -15,6 +15,7 @@ import { FixedApprover, Policy } from '../src/policy/policy.ts';
 const ADD = { x: 100, y: 600, width: 400, height: 120 };
 const tapAdd = async (engine: Awaited<ReturnType<typeof createEngine>>, device_id: string, agent: string, session?: any) => {
   const o = await engine.call('observe', { device_id }, agent, session);
+  if (!o.ok) return o; // a refused agent can't read the screen either
   const id = (o.result as any).elements.find((e: any) => e.text === 'Add to cart').id;
   return engine.call('tap', { device_id, element_id: id }, agent, session);
 };

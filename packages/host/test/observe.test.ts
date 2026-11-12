@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import type { RawNode, RawScreen } from '../src/execution/connector.ts';
 import { toRawNode } from '../src/execution/drivers/nodes.ts';
-import { buildObservation, ObservationStore } from '../src/execution/observe.ts';
+import { buildObservation, ObservationStore, scrub } from '../src/execution/observe.ts';
 
 function screen(): RawScreen {
   const raw = JSON.parse(readFileSync(new URL('./fixtures/checkout.raw.json', import.meta.url), 'utf8'));
@@ -143,4 +143,40 @@ test('tap point: clipped to the screen, off floating bars, refused when covered 
   assert.throws(() => center(el('e9', 16, 900, 361, 57), screen, size), /off screen/);
   const q = center(el('e1', 300, 10, 200, 40), [], size); // wider than the screen: center of the visible part
   assert.ok(q.x <= 393 && q.x >= 300, `x=${q.x}`);
+});
+
+test('scrub: OTP after the code word and before it ("482913 is your OTP"); amounts are left alone', () => {
+  for (const t of ['482913 is your OTP for login', 'Your code is 482913', '4829 is the verification code']) assert.doesNotMatch(scrub(t), /\d{4}/, t);
+  for (const t of ['Pay ₹1499 · Enter UPI PIN', 'Total ₹349', 'PNR 4521367890']) assert.equal(scrub(t), t, t);
+});
+
+test('tap point: the keyboard covers what is under it; a center under an overlay is refused, not tapped', async () => {
+  const { center } = await import('../src/execution/session.ts');
+  const el = (id: string, x: number, y: number, w: number, h: number, more: any = {}) => ({ id, role: 'button', clickable: true, bounds: { x, y, width: w, height: h }, ...more }) as any;
+  const size = { width: 1080, height: 2400 };
+  const cont = el('e1', 0, 1700, 1080, 150);
+  assert.throws(() => center(cont, [cont], size, { x: 0, y: 1600, width: 1080, height: 800 }), /keyboard/);
+  // A floating action button over the middle of a row: some corners are free, but the row's middle is covered.
+  const row = el('e2', 0, 500, 1080, 200), fab = el('e3', 340, 450, 400, 300);
+  const p = center(row, [row, fab], size);
+  assert.ok(!(p.x >= 340 && p.x <= 740 && p.y >= 450 && p.y <= 750), `tap avoided the FAB: ${p.x},${p.y}`);
+});
+
+test('the observation shown to the agent is never evicted by internal polls', () => {
+  const store = new ObservationStore();
+  const seen = build(store);
+  store.shown = seen.observation_id;
+  for (let i = 0; i < 200; i++) build(store);
+  const el = seen.elements.find(e => e.clickable)!;
+  assert.equal(store.resolve(el.id).text, el.text);
+});
+
+test('keyboard area is the keys, not a full-screen transparent IME window (Android 15 edge-to-edge)', () => {
+  const node = (resourceId: string, x: number, y: number, w: number, h: number, children: RawNode[] = []): RawNode => ({ cls: 'android.widget.FrameLayout', pkg: '', text: '', desc: '', resourceId,
+    clickable: false, longClickable: false, enabled: true, focused: false, scrollable: false, checkable: false, checked: false, selected: false, password: false,
+    bounds: { x, y, width: w, height: h }, path: 'r', children });
+  const s = screen();
+  s.root!.children.push(node('com.google.android.inputmethod.latin:id/root', 0, 63, 1080, 1794, [node('', 0, 1088, 1080, 748)]));
+  const { obs } = buildObservation(s, 'dev1', 'android', 'o1', 'native');
+  assert.deepEqual(obs.keyboard, { x: 0, y: 1088, width: 1080, height: 748 });
 });

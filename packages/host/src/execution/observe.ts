@@ -28,9 +28,11 @@ function roleOf(n: RawNode): Role {
 const REDACTED = '[redacted]';
 const CARD_LIKE = /\b(?:\d[ -]?){12,18}\d\b/g;
 // Digits may be spaced or dashed ("4 8 2 9 1 3", "482-913") to dodge a plain \d{6} match.
-const OTP_LIKE = /\b(otp|one[- ]?time|verification code|security code|passcode|pin|cvv|cvc)\b([^\d]{0,25})\d(?:[ -]?\d){2,7}\b/gi;
+const OTP_LIKE = /\b(otp|one[- ]?time|verification code|security code|passcode|code|pin|cvv|cvc)\b([^\d]{0,25})\d(?:[ -]?\d){2,7}\b/gi;
+// The other common order: "482913 is your OTP", "4829 is the code for login". Never an amount ("₹1499 · Enter PIN").
+const OTP_FIRST = /(?<!(?:₹|rs\.?|inr|\$|€|£)\s?[\d,]*)\b\d(?:[ -]?\d){3,7}\b(?=[^\d]{0,30}\b(?:otp|one[- ]?time|verification code|security code|passcode|code|pin)\b)/gi;
 export function scrub(s: string): string {
-  return s.replace(CARD_LIKE, REDACTED).replace(OTP_LIKE, (_m, kw: string, mid: string) => `${kw}${mid}${REDACTED}`);
+  return s.replace(CARD_LIKE, REDACTED).replace(OTP_LIKE, (_m, kw: string, mid: string) => `${kw}${mid}${REDACTED}`).replace(OTP_FIRST, REDACTED);
 }
 /** A field asking for a secret, whatever the driver reported (an app may not set the password flag on a PIN box). */
 const SECRET_FIELD = /\b(password|passcode|passwd|pin|mpin|upi pin|otp|cvv|cvc|secret)\b|one[- ]?time/i;
@@ -79,13 +81,18 @@ export function normalize(screen: RawScreen, obsId: string): Normalized & { trun
   const picked: { n: RawNode; text: string | null; label: string | null }[] = [];
 
   let kb: { x1: number; y1: number; x2: number; y2: number } | null = null;
+  // The IME window is often full-screen and transparent above the keys (Android 15 edge-to-edge), so it must not
+  // count as covering the app. No keyboard is taller than 60% of the screen: descend through such wrappers and take
+  // the first keyboard-sized node (the key panel, suggestion strip included) whole.
+  const keys = (n: RawNode) => {
+    if (!visible(n)) return;
+    if (n.bounds.height > screen.height * 0.6) { n.children.forEach(keys); return; }
+    const b = n.bounds;
+    kb = kb ? { x1: Math.min(kb.x1, b.x), y1: Math.min(kb.y1, b.y), x2: Math.max(kb.x2, b.x + b.width), y2: Math.max(kb.y2, b.y + b.height) }
+      : { x1: b.x, y1: b.y, x2: b.x + b.width, y2: b.y + b.height };
+  };
   const walk = (n: RawNode, insideClickable: boolean) => {
-    if (isKeyboard(n) && visible(n)) {
-      const b = n.bounds;
-      kb = kb ? { x1: Math.min(kb.x1, b.x), y1: Math.min(kb.y1, b.y), x2: Math.max(kb.x2, b.x + b.width), y2: Math.max(kb.y2, b.y + b.height) }
-        : { x1: b.x, y1: b.y, x2: b.x + b.width, y2: b.y + b.height };
-      return; // keys are noise for the agent; the area is reported as `keyboard`
-    }
+    if (isKeyboard(n) && visible(n)) { keys(n); return; } // keys are noise for the agent; the area is reported as `keyboard`
     if (!visible(n) && n.cls !== 'hierarchy') {
       // Zero-size containers (common on iOS) can still hold visible children.
       for (const c of n.children) walk(c, insideClickable);
@@ -155,6 +162,8 @@ type Saved = { id: string; hash: string; dup: number; rid: boolean };
  *  an earlier Mobius process still resolves against the live screen (same identity rules, same ambiguity checks). */
 export class ObservationStore {
   private seq = 0;
+  /** The observation the agent was last shown: never evicted, so its refs resolve (by identity) or fail as stale. */
+  shown: string | null = null;
   private history: { obs: Observation; fps: Map<string, Fingerprint> }[] = [];
   private saved: Saved[][] = [];
   private readonly file: string | null;
@@ -174,7 +183,7 @@ export class ObservationStore {
     this.history.push({ obs, fps });
     // ponytail: settle/verify polls add an observation every ~100 ms, so a small window evicts the ids the agent
     // just got from observe after one slow action. 64 covers a full verify timeout; the on-disk copy stays at 5.
-    if (this.history.length > 64) this.history.shift();
+    if (this.history.length > 64) this.history.splice(this.history.findIndex(h => h.obs.observation_id !== this.shown), 1);
     if (!this.file) return;
     this.saved.push([...fps].map(([id, f]) => ({ id, hash: identityHash(f), dup: f.dup_index, rid: !!f.resource_id })));
     this.saved = this.saved.slice(-5);
