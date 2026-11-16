@@ -451,6 +451,14 @@ pub fn handle(op: &str, udid: &str, req: &Value, max_jpeg: impl Fn(&[u8], u32) -
         "key" => match req["key"].as_str().unwrap_or("") {
             "home" => act(udid, "POST", "/wda/pressButton", json!({ "name": "home" })).map(|_| json!({})),
             "enter" => act(udid, "POST", "/wda/keys", json!({ "value": ["\n"] })).map(|_| json!({})),
+            // iOS has no back button: the system back gesture is a swipe in from the left edge.
+            "back" => {
+                let (w, h) = screen(udid)?;
+                let (y, x2) = (h as f64 / 2.0, w as f64 * 0.85);
+                // W3C actions, not the fast swipe: the fast path's synthesized touch doesn't start the edge gesture.
+                touch(udid, &[json!({ "type": "pointerMove", "duration": 0, "x": 3, "y": y }), json!({ "type": "pointerDown", "button": 0 }),
+                    json!({ "type": "pointerMove", "duration": 300, "x": x2, "y": y }), json!({ "type": "pointerUp", "button": 0 })]).map(|_| json!({}))
+            }
             k => Err(format!("key `{k}` does not exist on iOS")),
         },
         "launch" => act(udid, "POST", "/wda/apps/launch", json!({ "bundleId": req["app"].as_str().ok_or("missing `app`")? })).map(|_| json!({})),
@@ -490,13 +498,18 @@ pub fn handle(op: &str, udid: &str, req: &Value, max_jpeg: impl Fn(&[u8], u32) -
         },
         "info" => {
             let d = http(udid, "GET", "/wda/device/info", None).map(|r| r["value"].clone()).unwrap_or(Value::Null);
+            let os = http(udid, "GET", "/status", None).map(|r| r["value"]["os"]["version"].clone()).unwrap_or(Value::Null);
             let b = act(udid, "GET", "/wda/batteryInfo", Value::Null).map(|r| r["value"].clone()).unwrap_or(Value::Null);
             let (w, h) = screen(udid)?;
-            Ok(json!({ "id": udid, "platform": "ios", "model": d["model"], "name": d["name"], "version": d["osVersion"] .clone(), "width": w, "height": h,
-                "battery": b["level"].as_f64().map(|l| (l * 100.0).round() as i64), "locale": d["locale"] }))
+            Ok(json!({ "id": udid, "platform": "ios", "model": d["model"], "name": d["name"], "version": os, "width": w, "height": h,
+                "battery": b["level"].as_f64().map(|l| (l * 100.0).round() as i64), "locale": d["currentLocale"] }))
         }
         "reboot" => devicectl(&["device", "reboot", "--device", udid]),
-        "hide_keyboard" => act(udid, "POST", "/wda/keyboard/dismiss", json!({})).map(|_| json!({ "was_shown": true })).or_else(|_| Ok(json!({ "was_shown": false }))),
+        // WebDriverAgent's dismiss succeeds with no keyboard up, so look for one first.
+        "hide_keyboard" => {
+            if act(udid, "POST", "/element", json!({ "using": "class name", "value": "XCUIElementTypeKeyboard" })).is_err() { return Ok(json!({ "was_shown": false })); }
+            act(udid, "POST", "/wda/keyboard/dismiss", json!({})).map(|_| json!({ "was_shown": true }))
+        }
         "logs" => {
             // Live system log for a short window (iOS keeps no readable backlog): up to `lines`, stopping after `seconds`.
             let n = req["lines"].as_u64().unwrap_or(200).min(5000) as usize;

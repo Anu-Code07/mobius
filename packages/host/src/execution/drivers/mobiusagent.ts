@@ -149,7 +149,7 @@ export class MobiusAgentConnector implements Connector {
 
   async key(key: Key) {
     const k = KEYS[key];
-    if (!k || (this.platform === 'ios' && key !== 'home' && key !== 'enter')) throw new MobiusError('UNSUPPORTED_CAPABILITY', `Key "${key}" is not available on this device`);
+    if (!k || (this.platform === 'ios' && key !== 'home' && key !== 'enter' && key !== 'back')) throw new MobiusError('UNSUPPORTED_CAPABILITY', `Key "${key}" is not available on this device`);
     await this.drv.call('key', { ...this.d, key: k });
   }
 
