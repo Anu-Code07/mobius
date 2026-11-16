@@ -272,6 +272,7 @@ fn session(udid: &str) -> R<String> {
     // settings like screenshotQuality live in WebDriverAgent and carry over).
     let status = ensure_wda(udid)?;
     if let Some(sid) = status["sessionId"].as_str().filter(|s| !s.is_empty()) {
+        pin_active_app_point(udid, sid); // the session may come from an older driver that didn't set it
         SESSIONS.lock().unwrap().get_or_insert_with(HashMap::new).insert(udid.to_string(), sid.to_string());
         return Ok(sid.to_string());
     }
@@ -279,9 +280,29 @@ fn session(udid: &str) -> R<String> {
     let sid = r["sessionId"].as_str().or(r["value"]["sessionId"].as_str()).ok_or("WebDriverAgent gave no session")?.to_string();
     // Faster, smaller trees: don't wait for the app to go idle forever, keep depth sane.
     let _ = http(udid, "POST", &format!("/session/{sid}/appium/settings"), Some(&json!({ "settings": { "waitForIdleTimeout": 0, "animationCoolOffTimeout": 0, "reduceMotion": true, "screenshotQuality": 1, "snapshotMaxDepth": 60 } })));
+    pin_active_app_point(udid, &sid);
     SESSIONS.lock().unwrap().get_or_insert_with(HashMap::new).insert(udid.to_string(), sid.clone());
     Ok(sid)
 }
+
+/// WebDriverAgent decides which app is "active" (whose screen it reads, what activeAppInfo reports) by hit-testing one
+/// point, by default 20% in from the top-left corner. Notification banners slide in exactly there, so a banner made the
+/// home screen look active and the app underneath unreadable (live run: a Myntra banner over Settings). Pin the point
+/// to mid-screen, slightly above centre: below banners, above the keyboard, and still where system alerts appear
+/// (those should be read).
+fn pin_active_app_point(udid: &str, sid: &str) {
+    // WebDriverAgent keeps the point for its lifetime, across sessions: pin once per (device, session); a restarted
+    // WebDriverAgent has a new session id and gets pinned again.
+    static PINNED: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+    if !PINNED.lock().unwrap().get_or_insert_with(Default::default).insert(format!("{udid}|{sid}")) { return; }
+    let Ok(sz) = http(udid, "GET", &format!("/session/{sid}/window/size"), None) else { return };
+    let (Some(w), Some(h)) = (sz["value"]["width"].as_f64(), sz["value"]["height"].as_f64()) else { return };
+    let (x, y) = active_app_point(w, h);
+    let _ = http(udid, "POST", &format!("/session/{sid}/appium/settings"), Some(&json!({ "settings": { "activeAppDetectionPoint": format!("{x:.2},{y:.2}") } })));
+}
+
+/// Mid-width, 45% down: banners occupy the top ~120 pt, the keyboard the bottom ~40%.
+fn active_app_point(w: f64, h: f64) -> (f64, f64) { (w / 2.0, h * 0.45) }
 
 /// A session-scoped call, re-creating the session once if WebDriverAgent restarted.
 fn act(udid: &str, method: &str, tail: &str, body: Value) -> R<Value> {
@@ -387,7 +408,8 @@ pub fn handle(op: &str, udid: &str, req: &Value, max_jpeg: impl Fn(&[u8], u32) -
         "dump" => {
             // No session needed to read the screen (saves ~1.5 s on a cold start: session creation looks up the active
             // app several times). Actions create one when they need it.
-            ensure_wda(udid)?;
+            let status = ensure_wda(udid)?;
+            if let Some(sid) = status["sessionId"].as_str().filter(|s| !s.is_empty()) { pin_active_app_point(udid, sid); }
             // Foreground app in parallel with the tree; skip WDA's per-element visibility/accessibility checks (the slow part).
             let u = udid.to_string();
             let fg = std::thread::spawn(move || foreground(&u));
@@ -975,6 +997,16 @@ fn devicectl(args: &[&str]) -> R<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn active_app_point_clears_banners_and_keyboard() {
+        // iPhone 16 in points: banners reach ~120 pt from the top, the keyboard starts ~60% down.
+        let (x, y) = super::active_app_point(393.0, 852.0);
+        assert!((x - 196.5).abs() < 0.01);
+        assert!(y > 140.0 && y < 852.0 * 0.6, "y={y}");
+        let (lx, ly) = super::active_app_point(852.0, 393.0); // landscape
+        assert!(lx > 300.0 && ly > 120.0 && ly < 393.0 * 0.6);
+    }
+
     use super::*;
     #[test]
     fn udids() {
