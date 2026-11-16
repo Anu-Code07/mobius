@@ -347,7 +347,18 @@ fn uiautomator_dump(dev: &str) -> R<Value> {
         last = raw.trim().chars().take(200).collect();
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
-    Err(format!("no UI tree (screen off, locked, or never idle): {last}"))
+    Err(format!("{}: {last}", android_unreadable_reason(dev)))
+}
+
+/// Why the screen can't be read, from the device's real state, so a busy device isn't reported as a locked one.
+fn android_unreadable_reason(dev: &str) -> &'static str {
+    let power = shell(dev, "dumpsys power | grep -m1 mWakefulness=").unwrap_or_default();
+    if power.contains("Asleep") || power.contains("Dozing") { return "screen is off: wake the device"; }
+    let win = shell(dev, "dumpsys window | grep -E -m2 'isKeyguardShowing|mDreamingLockscreen|mShowingLockscreen'").unwrap_or_default();
+    if win.contains("isKeyguardShowing=true") || win.contains("mDreamingLockscreen=true") || win.contains("mShowingLockscreen=true") {
+        return "device is locked: unlock it";
+    }
+    "UI never went idle (an animation, video, or another automation tool such as uiautomator or Appium is holding the screen)"
 }
 
 /// `input text` takes ASCII only and treats spaces/shell characters specially.

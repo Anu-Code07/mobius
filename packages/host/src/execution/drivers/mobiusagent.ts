@@ -110,7 +110,8 @@ export class MobiusAgentConnector implements Connector {
   async dump(): Promise<RawScreen> {
     const r = await this.drv.call<{ tree: { hierarchy: any[] }; width: number; height: number; rotation: number; foregroundApp: string | null }>('dump', this.d).catch(e => {
       const msg = (e as Error).message;
-      if (/\block(ed)?\b|unlock|passcode/i.test(msg)) throw new MobiusError('DEVICE_LOCKED', `Could not read the screen: ${msg}`, { retryable: true, hint: 'Ask the user to wake and unlock the phone.' });
+      if (/never went idle/i.test(msg)) throw new MobiusError('DEVICE_OFFLINE', `Could not read the screen: ${msg}`, { retryable: true, hint: 'The device is busy. Wait a moment and retry; close other automation tools (uiautomator, Appium) if one is attached.' });
+      if (/screen is off|device is locked|\block(ed)?\b|unlock|passcode/i.test(msg)) throw new MobiusError('DEVICE_LOCKED', `Could not read the screen: ${msg}`, { retryable: true, hint: 'Ask the user to wake and unlock the phone.' });
       throw new MobiusError('DEVICE_OFFLINE', `Could not read the screen: ${msg}`, { retryable: true, hint: this.platform === 'ios' ? 'Check the device is connected and WebDriverAgent is running (mobius setup-ios).' : 'Check the device is connected (adb devices).' });
     });
     this.size = { width: r.width, height: r.height };

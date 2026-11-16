@@ -10,7 +10,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 TEAM="${MOBIUS_TEAM_ID:?set MOBIUS_TEAM_ID to your Apple developer team id}"
 DIR="${MOBIUS_WDA_DIR:-$HOME/.mobius/wda}"
 WDA_VERSION="${WDA_VERSION:-v9.15.0}"
-[ -d "$DIR/.git" ] || git clone --depth 1 --branch "$WDA_VERSION" https://github.com/appium/WebDriverAgent.git "$DIR"
+[ -d "$DIR/.git" ] || { echo "downloading WebDriverAgent $WDA_VERSION..."; git -c advice.detachedHead=false clone -q --depth 1 --branch "$WDA_VERSION" https://github.com/appium/WebDriverAgent.git "$DIR"; }
 cd "$DIR"
 # Mobius fast touch (tap/swipe without WebDriverAgent's app lookup and settle wait). BSD-3 allows shipping a modified build.
 PATCH="$HERE/wda-mobius-fast-touch.patch"

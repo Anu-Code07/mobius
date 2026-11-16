@@ -302,8 +302,8 @@ footer a { color: var(--ink-2); }
     <div>
       <p class="lede">Mobius lets Claude, Cursor or any MCP agent use a real Android phone, iPhone or simulator. The agent reads a clean, masked screen and taps through apps on its own. Anything that pays, books or sends waits for your thumb.</p>
       <div class="install">
-        <code id="cmd"><b>$</b> claude mcp add mobius -- npx -y @anuraghq/mobius mcp</code>
-        <button class="copy" type="button" data-copy="claude mcp add mobius -- npx -y @anuraghq/mobius mcp">Copy</button>
+        <code id="cmd"><b>$</b> npx -y @anuraghq/mobius init</code>
+        <button class="copy" type="button" data-copy="npx -y @anuraghq/mobius init">Copy</button>
       </div>
       <div class="links">
         <a href="https://github.com/Anu-Code07/mobius">Read the source</a>
@@ -462,20 +462,19 @@ footer a { color: var(--ink-2); }
 
   <section class="chapter" id="setup" aria-labelledby="h-setup">
     <div class="wrap">
-      <h2 id="h-setup">On your phone in three steps.</h2>
+      <h2 id="h-setup">Set up in one command.</h2>
       <div class="steps">
         <div class="step">
-          <h3>Plug in a phone or boot a simulator</h3>
-          <p>Android: turn on USB debugging. iPhone or simulator: build the runner once with your Apple team id.</p>
-          <code>MOBIUS_TEAM_ID=XXXXXXXXXX \
-  npx -y @anuraghq/mobius setup-ios</code>
+          <h3>Run one command</h3>
+          <p>It checks your machine, sets up Android and iOS, and finds your Apple team on its own.</p>
+          <code>npx -y @anuraghq/mobius init</code>
         </div>
         <div class="step">
-          <h3>Add Mobius to your agent</h3>
-          <p>Claude Code, or any MCP client with this config.</p>
-          <code>{ "mcpServers": { "mobius": {
-  "command": "npx",
-  "args": ["-y", "@anuraghq/mobius", "mcp"] } } }</code>
+          <h3>It adds itself to your agents</h3>
+          <p>Claude Code, Cursor and Claude Desktop, merged into your existing config with a backup. Or paste one prompt and let the agent install it.</p>
+          <code>"Install Mobius: run npx -y
+ @anuraghq/mobius init and fix
+ what it marks with ✗."</code>
         </div>
         <div class="step">
           <h3>Ask for something</h3>

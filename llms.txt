@@ -1,0 +1,16 @@
+# Mobius
+
+> Mobius is an MCP server that lets AI agents (Claude Code, Cursor, Claude Desktop, any MCP client) use a real Android phone, iPhone or simulator. Anything that pays, books, sends or can't be undone waits for a human's approval. npm: @anuraghq/mobius.
+
+## Install (for agents)
+
+1. Run `npx -y @anuraghq/mobius init`. It checks the machine, builds the iOS runner on macOS, and registers Mobius with Claude Code, Cursor and Claude Desktop.
+2. Output lines start with ✓ (fine), ✗ (problem; the next line starting with → is the exact fix) or · (information). Fix ✗ items you can from the terminal, then re-run `init`.
+3. Ask the human for steps only they can do: accept "Allow USB debugging?" on Android; unlock the iPhone and tap Trust; enable Developer Mode; add an Apple ID in Xcode if no certificate exists; choose an Apple team if several are listed (then run `MOBIUS_TEAM_ID=<id> npx -y @anuraghq/mobius setup-ios`).
+4. When it prints "Ready", restart the agent session and call the `device_list` tool.
+5. `npx -y @anuraghq/mobius doctor` re-runs the checks only. The first action on a new iPhone takes about 20 s (runner install); that is expected.
+
+## Docs
+
+- [README](https://github.com/Anu-Code07/mobius#readme): tools, policies, approvals, configuration, troubleshooting
+- [Website](https://anu-code07.github.io/mobius/)

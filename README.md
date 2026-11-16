@@ -7,10 +7,10 @@ Mobius is an [MCP](https://modelcontextprotocol.io) server that lets Claude Code
 **Website and film:** https://anu-code07.github.io/mobius/
 
 ```bash
-claude mcp add mobius -- npx -y @anuraghq/mobius mcp
+npx -y @anuraghq/mobius init
 ```
 
-Then ask: *"Open Settings on my phone and turn on dark mode."*
+One command checks your machine, sets up Android and iOS, and adds Mobius to Claude Code, Cursor and Claude Desktop. Then ask your agent: *"Open Settings on my phone and turn on dark mode."*
 
 <p align="center"><a href="https://anu-code07.github.io/mobius/"><img src="site/assets/launch-poster.png" width="720" alt="The Mobius approval dialog on a Mac, holding an agent's tap on Pay ₹128 in Swiggy on a real iPhone"></a></p>
 <p align="center"><sub>From the launch film, recorded on a real iPhone: an agent orders a burger on Swiggy and Mobius holds the tap on <b>Pay ₹128</b> until a human decides. <a href="site/assets/launch.mp4">Watch the film (65 s)</a>.</sub></p>
@@ -32,52 +32,60 @@ Then ask: *"Open Settings on my phone and turn on dark mode."*
 
 ## Quick start
 
-### 1. Requirements
+```bash
+npx -y @anuraghq/mobius init
+```
+
+That one command:
+- checks Node, the driver, Android (`adb` and connected devices) and iOS (Xcode, iPhones, simulators), and prints the exact fix for anything missing;
+- builds the iOS runner on a Mac with Xcode, signed with your Apple team, which it finds in your keychain (no team id to look up);
+- adds Mobius to the agents on this machine: Claude Code, Cursor and Claude Desktop. It never overwrites an existing entry and backs up any file it changes.
+
+Then restart your agent and ask: *"What devices are connected?"*
+
+Re-run `init` any time; it is safe and only does what is still missing. `npx -y @anuraghq/mobius doctor` runs just the checks.
+
+### Let your agent install it
+
+Paste this into Claude Code, Cursor or any agent with a terminal:
+
+> Install Mobius so you can use my phone: run `npx -y @anuraghq/mobius init`, fix anything it marks with ✗ that you can fix from the terminal, tell me about anything only I can do on the phone, then restart and list my devices.
+
+**Instructions for agents installing Mobius**
+1. Run `npx -y @anuraghq/mobius init`. Lines start with `✓` (fine), `✗` (a problem, followed by `→` and the exact fix) or `·` (information).
+2. Fix what you can from the terminal, for example `brew install android-platform-tools` when `adb` is missing, then run `init` again.
+3. Some fixes need the human, so ask them: accept "Allow USB debugging?" on an Android phone; unlock an iPhone and tap Trust; turn on Developer Mode (Settings → Privacy & Security → Developer Mode); add an Apple ID in Xcode (Settings → Accounts) if no certificate exists.
+4. If `init` lists more than one Apple team, ask the human which one to use, then run `MOBIUS_TEAM_ID=<that id> npx -y @anuraghq/mobius setup-ios`.
+5. When `init` ends with "Ready", the MCP server is registered. Restart the agent session (or reload MCP servers) and call `device_list`.
+6. The first action on a new iPhone takes about 20 seconds while the runner installs. That is expected, not a hang.
+
+### Requirements
 
 - **Node 22.5+**
 - **macOS on Apple Silicon** for the npm package (it bundles the device driver for that platform). On Linux or an Intel Mac, build the driver from this repo (`cargo build --release` in `drivers/mobiusagent-driver`) and set `MOBIUS_DRIVER_BIN` to the binary.
 - **Android:** platform-tools (`adb`) and an emulator, or a phone with USB debugging on.
 - **iOS:** Xcode with a simulator, or an iPhone over USB with Developer Mode on.
 
-### 2. Connect a device
+### Manual setup
 
-**Android phone or emulator**
-```bash
-adb devices          # your phone or emulator should be listed as "device"
-```
-Nothing else to install: Mobius pushes its own small helper to the device the first time.
+`init` does all of this. Do it by hand only if you prefer.
 
-**iPhone or iOS simulator** (once per Mac): Mobius drives iOS through a WebDriverAgent runner signed with your Apple developer team.
-```bash
-MOBIUS_TEAM_ID=XXXXXXXXXX npx -y @anuraghq/mobius setup-ios
-```
-Your team id is the "OU" of your *Apple Development* certificate (Keychain Access → My Certificates). On a real iPhone: trust the developer app once in Settings → General → VPN & Device Management, keep the phone unlocked, and for long sessions set Auto-Lock to Never.
+**Android:** `adb devices` should list your phone or emulator as `device`. Mobius pushes its own small helper to the device the first time.
 
-### 3. Add Mobius to your agent
+**iOS** (once per Mac): `npx -y @anuraghq/mobius setup-ios`. It finds your Apple team in your keychain; with several teams, set `MOBIUS_TEAM_ID`. On a real iPhone, trust the developer app once in Settings → General → VPN & Device Management.
 
-**Claude Code**
+**Agents:**
 ```bash
 claude mcp add mobius -- npx -y @anuraghq/mobius mcp
 ```
-
-**Cursor, Claude Desktop or any MCP client**
 ```json
 { "mcpServers": { "mobius": { "command": "npx", "args": ["-y", "@anuraghq/mobius", "mcp"] } } }
 ```
 
-With environment variables (a policy, for example):
-```json
-{ "mcpServers": { "mobius": {
-  "command": "npx", "args": ["-y", "@anuraghq/mobius", "mcp"],
-  "env": { "MOBIUS_POLICY": "/Users/you/.mobius/policy.json" } } } }
-```
-
-### 4. Ask for something
-
+Ask for something:
 - *"What devices are connected?"*
 - *"On the emulator, open Settings and go to Network & internet."*
 - *"On my iPhone, search Apple Maps for Cubbon Park and zoom in."*
-- *"Find a kurta on Myntra and show me the first three results."*
 - *"Order a burger on Swiggy and stop at payment."* (Mobius will ask you before paying.)
 
 ---
@@ -215,9 +223,12 @@ npx -y @anuraghq/mobius <command>
 
 | Command | What it does |
 |---|---|
+| `init` | Set everything up: checks, iOS runner, and adds Mobius to Claude Code, Cursor and Claude Desktop |
+| `doctor` | Check Node, driver, Android and iOS, with the exact fix for anything missing |
 | `mcp` | Run the MCP server over stdio (what your agent starts) |
 | `serve [--port 7777] [--host 127.0.0.1]` | REST API with the same engine (`POST /v1/actions`, `GET /v1/tools`, `GET /v1/audit`) |
-| `setup-ios` | Build and sign the iOS runner once (needs `MOBIUS_TEAM_ID`) |
+| `setup-ios` | Build and sign the iOS runner once (finds your Apple team; `MOBIUS_TEAM_ID` to choose) |
+| `--version`, `--help` | Version and usage |
 | `stop` / `resume` | Kill switch: refuse every agent action on this machine, or allow them again |
 | `audit verify` | Check the audit log's hash chain and signatures |
 | `audit export` | Print the audit log as JSONL |
@@ -240,7 +251,7 @@ npx -y @anuraghq/mobius <command>
 | `MOBIUS_REQUIRE_SESSION=1` | Refuse agents without a valid session |
 | `MOBIUS_SESSION_PUBKEY` | Verify sessions with an operator key instead of this install's |
 | `MOBIUS_API_TOKEN` | Bearer token for `serve` (generated if unset) |
-| `MOBIUS_TEAM_ID` | Apple developer team for `setup-ios` |
+| `MOBIUS_TEAM_ID` | Apple developer team for `setup-ios` (found automatically when you have one) |
 | `MOBIUS_DRIVER_BIN` | Use a driver binary you built |
 | `MOBIUS_WDA_DIR` | Where the iOS runner is built (default `~/.mobius/wda`) |
 | `MOBIUS_HOME`, `MOBIUS_DB` | Where Mobius keeps its keys and audit log (default `~/.mobius`) |
@@ -252,8 +263,10 @@ npx -y @anuraghq/mobius <command>
 
 | You see | Do this |
 |---|---|
+| Anything not working | Run `npx -y @anuraghq/mobius doctor`: it names the problem and the fix. |
 | No devices listed | Android: `adb devices` must show `device` (accept the USB debugging prompt). iOS: run `setup-ios` once; for a real iPhone, unlock it and trust this Mac. |
-| `DEVICE_LOCKED` | Unlock the phone. For long runs set Auto-Lock to Never. |
+| `DEVICE_LOCKED` | Unlock or wake the phone. For long runs set Auto-Lock to Never. |
+| `DEVICE_OFFLINE` "UI never went idle" | The device is busy (an animation, a video, or another automation tool like uiautomator or Appium). Wait and retry, or close the other tool. |
 | `No Mobius driver for linux-x64` (or similar) | The npm package bundles the Apple Silicon driver. Build it from this repo and set `MOBIUS_DRIVER_BIN`. |
 | `APPROVAL_REJECTED` on something harmless | The defaults lean safe. Check the reason with `mobius audit export`, then add a narrow `allow` rule for it. |
 | `ELEMENT_NOT_FOUND … covered by …` | Something floats over the target (a toolbar, the keyboard). `mobius_tap_text` and `mobius_scroll_until_visible` scroll it into view for you. |
