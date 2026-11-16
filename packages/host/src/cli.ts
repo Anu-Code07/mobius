@@ -236,7 +236,7 @@ async function installAdb() {
 
 /** Every MCP client Mobius can add itself to: found by its CLI on PATH or its config folder; never overwrites an entry. */
 type Client = { id: string; name: string } & (
-  | { kind: 'cli'; bin: string; list: string[]; add: string[] }
+  | { kind: 'cli'; bin: string; list: string[]; add: string[]; get?: string[] }
   | { kind: 'json'; dir: string; file: string; key: string; entry: unknown }
 );
 const PKG = '@anuraghq/mobius@latest';
@@ -244,7 +244,7 @@ function clients(home: string, join: (...p: string[]) => string): Client[] {
   const std = { command: 'npx', args: ['-y', PKG, 'mcp'] };
   const appSupport = process.platform === 'darwin' ? join(home, 'Library', 'Application Support') : process.env.APPDATA ?? join(home, '.config');
   return [
-    { id: 'claude', name: 'Claude Code', kind: 'cli', bin: 'claude', list: ['mcp', 'list'], add: ['mcp', 'add', 'mobius', '-s', 'user', '--', 'npx', '-y', PKG, 'mcp'] },
+    { id: 'claude', name: 'Claude Code', kind: 'cli', bin: 'claude', list: ['mcp', 'list'], get: ['mcp', 'get', 'mobius'], add: ['mcp', 'add', 'mobius', '-s', 'user', '--', 'npx', '-y', PKG, 'mcp'] },
     { id: 'codex', name: 'Codex', kind: 'cli', bin: 'codex', list: ['mcp', 'list'], add: ['mcp', 'add', 'mobius', '--', 'npx', '-y', PKG, 'mcp'] },
     { id: 'gemini', name: 'Gemini CLI', kind: 'cli', bin: 'gemini', list: ['mcp', 'list'], add: ['mcp', 'add', '-s', 'user', 'mobius', 'npx', '-y', PKG, 'mcp'] },
     { id: 'amp', name: 'Amp', kind: 'cli', bin: 'amp', list: ['mcp', 'list'], add: ['mcp', 'add', 'mobius', '--', 'npx', '-y', PKG, 'mcp'] },
@@ -286,9 +286,12 @@ async function registerAgents(only?: Set<string>): Promise<number> {
   }
   for (const c of found) {
     if (c.kind === 'cli') {
-      const list = await sh(c.bin, c.list);
-      if (list && /\bmobius\b/.test(list.stdout)) { okLine(`${c.name}: already has Mobius`); continue; }
-      const r = await sh(c.bin, c.add);
+      // `claude mcp list` starts every configured server to health-check it (tens of seconds); `get` asks about one.
+      if (process.stdout.isTTY) process.stdout.write(`  … ${c.name}: checking`);
+      const has = c.get ? (await sh(c.bin, c.get))?.status === 0 : /\bmobius\b/.test((await sh(c.bin, c.list))?.stdout ?? '');
+      const r = has ? null : await sh(c.bin, c.add);
+      if (process.stdout.isTTY) process.stdout.write('\r\x1b[K');
+      if (has) { okLine(`${c.name}: already has Mobius`); continue; }
       if (!(r && r.status === 0)) failed++;
       r && r.status === 0 ? okLine(`${c.name}: added`) : badLine(`${c.name}: could not add Mobius`, `${c.bin} ${c.add.map(a => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' ')}`);
       continue;
