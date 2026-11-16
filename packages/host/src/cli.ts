@@ -12,13 +12,47 @@ const operatorKey = process.env.MOBIUS_SESSION_PUBKEY ? readFileSync(process.env
 import { driverBuilt, driverPath, iosAgentReady, MobiusAgentConnector, MobiusAgentDriver } from './execution/drivers/mobiusagent.ts';
 import type { Connector } from './execution/connector.ts';
 
-/** Every online device through the Mobius driver. iOS devices also need the Mobius Agent runner set up once. */
+/** Every online device through the Mobius driver. iOS devices need the Mobius Agent runner, which builds itself in the
+ *  background the first time an iPhone or simulator shows up (see iosInBackground). */
 const connectors = (driver: MobiusAgentDriver) => async (): Promise<Connector[]> => {
   if (!driverBuilt()) throw new Error(`No Mobius driver for ${process.platform}-${process.arch} in this install (looked for ${driverPath()}). ` +
     'Build it from https://github.com/Anu-Code07/mobius (`cargo build --release` in drivers/mobiusagent-driver) and point MOBIUS_DRIVER_BIN at the binary.');
+  const all = (await driver.devices()).filter(d => d.state === 'online');
   const ios = iosAgentReady();
-  return (await driver.devices()).filter(d => d.state === 'online' && (d.platform === 'android' || ios)).map(d => new MobiusAgentConnector(driver, d));
+  if (!ios && all.some(d => d.platform === 'ios')) await iosInBackground(); // decides now, builds in the background
+  return all.filter(d => d.platform === 'android' || ios).map(d => new MobiusAgentConnector(driver, d));
 };
+
+/** iOS setup without a setup step: built once, in the background, while Android keeps working. Never writes to stdout
+ *  (that is the MCP channel); progress goes to ~/.mobius/setup-ios.log and to device_list's notes. */
+let iosState: { kind: 'idle' | 'building' | 'failed' | 'needs_team' | 'no_xcode'; detail?: string } = { kind: 'idle' };
+async function iosInBackground() {
+  if (iosState.kind !== 'idle' || process.platform !== 'darwin') return;
+  if (!hasXcode()) { iosState = { kind: 'no_xcode' }; return; }
+  const t = await resolveTeam();
+  if ('choices' in t) { iosState = { kind: 'needs_team', detail: t.choices.map(([id, n]) => `${id} (${n})`).join(', ') }; return; }
+  if (!t.team) { iosState = { kind: 'needs_team', detail: 'none: add an Apple ID in Xcode → Settings → Accounts' }; return; }
+  const script = await setupScript();
+  if (!script) { iosState = { kind: 'failed', detail: 'setup.sh missing from this install' }; return; }
+  iosState = { kind: 'building' };
+  const { spawn } = await import('node:child_process');
+  const { openSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const log = join(mobiusHome(), 'setup-ios.log');
+  const child = spawn('sh', [script], { env: { ...process.env, MOBIUS_TEAM_ID: t.team }, stdio: ['ignore', openSync(log, 'w'), openSync(log, 'a')] });
+  child.on('exit', code => { iosState = code === 0 ? { kind: 'idle' } : { kind: 'failed', detail: `see ${log}` }; });
+}
+function iosNotes(): string[] {
+  switch (iosState.kind) {
+    case 'building': return iosAgentReady()
+      ? ['iOS: iPhones are ready; simulator support finishes in about a minute.']
+      : ['iOS: preparing the Mobius runner for iPhones and simulators (one time, about 2 minutes). iOS devices appear here when it is done; Android works now.'];
+    case 'needs_team': return [`iOS: choose the Apple team that signs the Mobius runner, then call device_list again. Ask the user which one, and run: MOBIUS_TEAM_ID=<id> npx -y @anuraghq/mobius setup-ios. Teams found: ${iosState.detail}`];
+    case 'no_xcode': return ['iOS: install Xcode from the App Store to use iPhones and simulators. Android works now.'];
+    case 'failed': return [`iOS: the runner build failed (${iosState.detail}). Run "npx -y @anuraghq/mobius doctor" for the fix.`];
+    default: return [];
+  }
+}
 import { defaultApprover, Policy } from './policy/policy.ts';
 import { writeFileSync, rmSync } from 'node:fs';
 import { killSwitchPath, revokedPath } from './infrastructure/plane.ts';
@@ -37,7 +71,9 @@ const HELP = `mobius: let AI agents use a real phone, safely
 
 Usage: npx -y @anuraghq/mobius <command>
 
-  init                        Set everything up: checks, iOS runner, and adds Mobius to Claude Code, Cursor, Claude Desktop
+  init (or install)           Set everything up: installs adb, builds the iOS runner, adds Mobius to your MCP clients
+                              (Claude Code, Codex, Cursor, VS Code, Claude Desktop, Windsurf, Gemini, Copilot, Kiro, Amp, opencode...)
+                              --clients cursor,vscode  only those; --no-agents, --no-ios, --no-install to skip steps
   mcp                         Run the MCP server (what your agent starts)
   doctor                      Check your setup: Node, driver, Android, iOS
   setup-ios                   Build and sign the iOS runner once (finds your Apple team)
@@ -137,17 +173,26 @@ async function previousTeam(): Promise<string | null> {
   return /TeamIdentifier=([A-Z0-9]{10})/.exec((r?.stderr ?? '') + (r?.stdout ?? ''))?.[1] ?? null;
 }
 
-/** Pick the Apple team: MOBIUS_TEAM_ID, then the previous build's team, then the only team, then ask (terminal) or explain. */
-async function pickTeam(): Promise<string | null> {
-  if (process.env.MOBIUS_TEAM_ID) return process.env.MOBIUS_TEAM_ID;
+/** The Apple team, decided without asking: MOBIUS_TEAM_ID, the previous build's team, or the only team. Otherwise the choices. */
+async function resolveTeam(): Promise<{ team: string | null; why?: string } | { choices: [string, string][] }> {
+  if (process.env.MOBIUS_TEAM_ID) return { team: process.env.MOBIUS_TEAM_ID, why: 'MOBIUS_TEAM_ID' };
   const prev = await previousTeam();
-  if (prev) { say(`  Using team ${prev} (your previous Mobius build).`); return prev; }
+  if (prev) return { team: prev, why: 'your previous Mobius build' };
   const teams = await appleTeams();
-  if (teams.length === 1) { say(`  Using team ${teams[0]![0]} (${teams[0]![1]}).`); return teams[0]![0]; }
-  if (!teams.length) {
-    say('  No Apple Development certificate found. In Xcode: Settings → Accounts → add your Apple ID → Manage Certificates → + Apple Development. A free Apple ID works.');
+  if (teams.length === 1) return { team: teams[0]![0], why: teams[0]![1] };
+  if (!teams.length) return { team: null };
+  return { choices: teams };
+}
+
+/** Interactive team choice for setup-ios / init: decides when it can, asks in a terminal, explains otherwise. */
+async function pickTeam(): Promise<string | null> {
+  const r = await resolveTeam();
+  if ('team' in r && r.team) { say(`  Using team ${r.team} (${r.why}).`); return r.team; }
+  if ('team' in r) {
+    say('  No Apple Development certificate found. In Xcode: Settings \u2192 Accounts \u2192 add your Apple ID \u2192 Manage Certificates \u2192 + Apple Development. A free Apple ID works.');
     return null;
   }
+  const teams = r.choices;
   say('  You have more than one Apple team:');
   teams.forEach(([id, name], i) => say(`    ${i + 1}. ${id}  ${name}`));
   if (process.stdin.isTTY) {
@@ -162,11 +207,15 @@ async function pickTeam(): Promise<string | null> {
   return null;
 }
 
+async function setupScript(): Promise<string | undefined> {
+  const { fileURLToPath } = await import('node:url');
+  return [new URL('../ios-agent/setup.sh', import.meta.url), new URL('../../../drivers/mobiusagent-driver/ios-agent/setup.sh', import.meta.url)]
+    .map(u => fileURLToPath(u)).find(p => existsSync(p));
+}
+
 async function setupIos(): Promise<number> {
   if (process.platform !== 'darwin') { say('iOS needs a Mac with Xcode.'); return 1; }
-  const { fileURLToPath } = await import('node:url');
-  const script = [new URL('../ios-agent/setup.sh', import.meta.url), new URL('../../../drivers/mobiusagent-driver/ios-agent/setup.sh', import.meta.url)]
-    .map(u => fileURLToPath(u)).find(p => existsSync(p));
+  const script = await setupScript();
   if (!script) { say('ios-agent/setup.sh not found in this install'); return 1; }
   const team = await pickTeam();
   if (!team) return 2;
@@ -174,41 +223,90 @@ async function setupIos(): Promise<number> {
   return (await sh('sh', [script], { inherit: true }))?.status ?? 1;
 }
 
-/** Add Mobius to the agents installed here. Never overwrites an existing entry; backs up any file it changes. */
-async function registerAgents() {
+/** init installs Android platform-tools when adb is missing and Homebrew is there; elsewhere doctor prints the command. */
+async function installAdb() {
+  const adb = await sh('adb', ['version']);
+  if (adb && adb.status === 0) return;
+  const brew = await sh('brew', ['--version']);
+  if (!brew || brew.status !== 0) return;
+  say('Installing Android platform-tools (adb) with Homebrew...');
+  const r = await sh('brew', ['install', 'android-platform-tools'], { inherit: true });
+  say(r && r.status === 0 ? '  \u2713 adb installed\n' : '  \u2717 Homebrew could not install adb; see above.\n');
+}
+
+/** Every MCP client Mobius can add itself to: found by its CLI on PATH or its config folder; never overwrites an entry. */
+type Client = { id: string; name: string } & (
+  | { kind: 'cli'; bin: string; list: string[]; add: string[] }
+  | { kind: 'json'; dir: string; file: string; key: string; entry: unknown }
+);
+const PKG = '@anuraghq/mobius@latest';
+function clients(home: string, join: (...p: string[]) => string): Client[] {
+  const std = { command: 'npx', args: ['-y', PKG, 'mcp'] };
+  const appSupport = process.platform === 'darwin' ? join(home, 'Library', 'Application Support') : process.env.APPDATA ?? join(home, '.config');
+  return [
+    { id: 'claude', name: 'Claude Code', kind: 'cli', bin: 'claude', list: ['mcp', 'list'], add: ['mcp', 'add', 'mobius', '-s', 'user', '--', 'npx', '-y', PKG, 'mcp'] },
+    { id: 'codex', name: 'Codex', kind: 'cli', bin: 'codex', list: ['mcp', 'list'], add: ['mcp', 'add', 'mobius', '--', 'npx', '-y', PKG, 'mcp'] },
+    { id: 'gemini', name: 'Gemini CLI', kind: 'cli', bin: 'gemini', list: ['mcp', 'list'], add: ['mcp', 'add', '-s', 'user', 'mobius', 'npx', '-y', PKG, 'mcp'] },
+    { id: 'amp', name: 'Amp', kind: 'cli', bin: 'amp', list: ['mcp', 'list'], add: ['mcp', 'add', 'mobius', '--', 'npx', '-y', PKG, 'mcp'] },
+    { id: 'cursor', name: 'Cursor', kind: 'json', dir: join(home, '.cursor'), file: join(home, '.cursor', 'mcp.json'), key: 'mcpServers', entry: std },
+    { id: 'vscode', name: 'VS Code', kind: 'json', dir: join(appSupport, 'Code', 'User'), file: join(appSupport, 'Code', 'User', 'mcp.json'), key: 'servers', entry: { type: 'stdio', ...std } },
+    { id: 'claude-desktop', name: 'Claude Desktop', kind: 'json', dir: join(appSupport, 'Claude'), file: join(appSupport, 'Claude', 'claude_desktop_config.json'), key: 'mcpServers', entry: std },
+    { id: 'windsurf', name: 'Windsurf', kind: 'json', dir: join(home, '.codeium', 'windsurf'), file: join(home, '.codeium', 'windsurf', 'mcp_config.json'), key: 'mcpServers', entry: std },
+    { id: 'kiro', name: 'Kiro', kind: 'json', dir: join(home, '.kiro'), file: join(home, '.kiro', 'settings', 'mcp.json'), key: 'mcpServers', entry: std },
+    { id: 'copilot', name: 'Copilot CLI', kind: 'json', dir: join(home, '.copilot'), file: join(home, '.copilot', 'mcp-config.json'), key: 'mcpServers', entry: { type: 'local', ...std, tools: ['*'] } },
+    { id: 'antigravity', name: 'Antigravity', kind: 'json', dir: join(home, '.gemini', 'antigravity'), file: join(home, '.gemini', 'config', 'mcp_config.json'), key: 'mcpServers', entry: std },
+    { id: 'opencode', name: 'opencode', kind: 'json', dir: join(home, '.config', 'opencode'), file: join(home, '.config', 'opencode', 'opencode.json'), key: 'mcp', entry: { type: 'local', command: ['npx', '-y', PKG, 'mcp'], enabled: true } },
+  ];
+}
+
+async function registerAgents(only?: Set<string>): Promise<number> {
+  let failed = 0;
   const { join, dirname } = await import('node:path');
   const { homedir } = await import('node:os');
   const { copyFileSync, mkdirSync } = await import('node:fs');
-  const entry = { command: 'npx', args: ['-y', '@anuraghq/mobius', 'mcp'] };
-  let any = false;
-  const claude = await sh('claude', ['mcp', 'list']);
-  if (claude && claude.status === 0) {
-    any = true;
-    if (/\bmobius\b/.test(claude.stdout)) okLine('Claude Code: already has Mobius');
-    else {
-      const r = await sh('claude', ['mcp', 'add', 'mobius', '-s', 'user', '--', 'npx', '-y', '@anuraghq/mobius', 'mcp']);
-      r && r.status === 0 ? okLine('Claude Code: added (user scope)') : badLine('Claude Code: could not add Mobius', 'claude mcp add mobius -s user -- npx -y @anuraghq/mobius mcp');
-    }
+  // Find what's installed.
+  const found: Client[] = [];
+  for (const c of clients(homedir(), join)) {
+    if (only && !only.has(c.id)) continue;
+    if (c.kind === 'cli') { const r = await sh(c.bin, ['--version']); if (r && r.status === 0) found.push(c); }
+    else if (existsSync(c.dir)) found.push(c);
   }
-  const files: [string, string][] = [
-    ['Cursor', join(homedir(), '.cursor', 'mcp.json')],
-    ['Claude Desktop', process.platform === 'darwin' ? join(homedir(), 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json')
-      : join(process.env.APPDATA ?? join(homedir(), '.config'), 'Claude', 'claude_desktop_config.json')],
-  ];
-  for (const [name, file] of files) {
-    if (!existsSync(dirname(file))) continue; // that agent isn't installed
-    any = true;
-    let cfg: { mcpServers?: Record<string, unknown> } = {};
-    if (existsSync(file)) {
-      try { cfg = JSON.parse(readFileSync(file, 'utf8') || '{}'); } catch { badLine(`${name}: ${file} isn't valid JSON, left untouched`, `Add {"mcpServers": {"mobius": ${JSON.stringify(entry)}}} by hand`); continue; }
-    }
-    if (cfg.mcpServers?.mobius) { okLine(`${name}: already has Mobius`); continue; }
-    if (existsSync(file)) copyFileSync(file, file + '.bak-mobius');
-    mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, JSON.stringify({ ...cfg, mcpServers: { ...(cfg.mcpServers ?? {}), mobius: entry } }, null, 2) + '\n');
-    okLine(`${name}: added to ${file}${existsSync(file + '.bak-mobius') ? ' (backup: .bak-mobius)' : ''}`);
+  if (!found.length) {
+    say('  · No MCP client found. Add this to yours:\n    {"mcpServers": {"mobius": {"command": "npx", "args": ["-y", "@anuraghq/mobius@latest", "mcp"]}}}');
+    return 0;
   }
-  if (!any) say('  · No agent found. Add this to your MCP client\'s config:\n    {"mcpServers": {"mobius": {"command": "npx", "args": ["-y", "@anuraghq/mobius", "mcp"]}}}');
+  // In a terminal, confirm; an agent running init (no terminal) gets every client it found.
+  if (process.stdin.isTTY && !only) {
+    const { createInterface } = await import('node:readline/promises');
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    say(`  Found: ${found.map(c => c.name).join(', ')}`);
+    const ans = (await rl.question('  Add Mobius to all of them? [Y/n] ')).trim().toLowerCase();
+    rl.close();
+    if (ans === 'n' || ans === 'no') { say('  Skipped. Pick some with: npx -y @anuraghq/mobius init --clients cursor,vscode'); return 0; }
+  }
+  for (const c of found) {
+    if (c.kind === 'cli') {
+      const list = await sh(c.bin, c.list);
+      if (list && /\bmobius\b/.test(list.stdout)) { okLine(`${c.name}: already has Mobius`); continue; }
+      const r = await sh(c.bin, c.add);
+      if (!(r && r.status === 0)) failed++;
+      r && r.status === 0 ? okLine(`${c.name}: added`) : badLine(`${c.name}: could not add Mobius`, `${c.bin} ${c.add.map(a => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' ')}`);
+      continue;
+    }
+    let cfg: Record<string, unknown> = {};
+    if (existsSync(c.file)) {
+      try { cfg = JSON.parse(readFileSync(c.file, 'utf8') || '{}'); }
+      catch { failed++; badLine(`${c.name}: ${c.file} isn't valid JSON, left untouched`, `Add "mobius": ${JSON.stringify(c.entry)} under "${c.key}" by hand`); continue; }
+    }
+    const servers = (cfg[c.key] ?? {}) as Record<string, unknown>;
+    if (servers.mobius) { okLine(`${c.name}: already has Mobius`); continue; }
+    const had = existsSync(c.file);
+    if (had) copyFileSync(c.file, c.file + '.bak-mobius');
+    mkdirSync(dirname(c.file), { recursive: true });
+    writeFileSync(c.file, JSON.stringify({ ...cfg, [c.key]: { ...servers, mobius: c.entry } }, null, 2) + '\n');
+    okLine(`${c.name}: added${had ? ' (backup: ' + c.file + '.bak-mobius)' : ''}`);
+  }
+  return failed;
 }
 
 
@@ -224,6 +322,7 @@ if (cmd === 'mcp') {
     defaultApprover(),
   );
   mobius.persistIds = true;
+  mobius.notes = iosNotes;
   // A signed agent session handed to this MCP server by its operator (identity + policy version for every action).
   const tok = process.env.MOBIUS_SESSION_TOKEN;
   if (tok) {
@@ -251,6 +350,7 @@ if (cmd === 'mcp') {
   const audit = new AuditLog();
   const mobius = new Mobius(connectors(driver), audit, new Policy(), defaultApprover());
   mobius.persistIds = true;
+  mobius.notes = iosNotes;
   const engine = await createEngine(mobius);
   createHttpServer(engine, audit, token, operatorKey).listen(port, host, () => log('info', 'mobius rest ready', { url: `http://${host}:${port}/v1` }));
   const shutdown = async () => { await engine.close().catch(() => {}); driver.close(); process.exit(0); };
@@ -308,23 +408,28 @@ if (cmd === 'mcp') {
 } else if (cmd === 'doctor') {
   // Checks everything a first run needs and says exactly how to fix what's missing.
   const problems = await checks();
-  process.stdout.write(problems ? `\n${problems} thing${problems > 1 ? 's' : ''} to fix.\n` : '\nAll good. Add Mobius to your agent: npx -y @anuraghq/mobius init\n');
+  process.stdout.write(problems ? `\n${problems} thing${problems > 1 ? 's' : ''} to fix.\n` : '\nAll good. Add Mobius to your agents: npx -y @anuraghq/mobius@latest init\n');
   process.exit(problems ? 1 : 0);
-} else if (cmd === 'init') {
+} else if (cmd === 'init' || cmd === 'install') {
   // Zero-friction onboarding: check the machine, build the iOS runner if needed, and register Mobius with the agents
   // installed here (Claude Code, Cursor, Claude Desktop). Safe to re-run; existing entries and files are kept.
   const flags = new Set(process.argv.slice(3));
   process.stdout.write(`Setting up Mobius ${version()}\n\n`);
+  if (!flags.has('--no-install')) await installAdb();
   let problems = await checks({ quietTail: true });
   if (process.platform === 'darwin' && !flags.has('--no-ios') && !iosAgentReady() && hasXcode()) {
     process.stdout.write('\nBuilding the iOS runner (one time, about 2 minutes)...\n');
     const code = await setupIos();
     if (code === 0) problems = Math.max(0, problems - 1);
   }
-  if (!flags.has('--no-agents')) { process.stdout.write('\nAgents\n'); await registerAgents(); }
+  const argv = process.argv.slice(3);
+  const ci = argv.indexOf('--clients');
+  const only = ci >= 0 && argv[ci + 1] ? new Set(argv[ci + 1]!.split(',').map(x => x.trim()).filter(Boolean)) : undefined;
+  let manual = 0;
+  if (!flags.has('--no-agents')) { process.stdout.write('\nAgents\n'); manual = await registerAgents(only); }
   process.stdout.write(problems
     ? `\n${problems} thing${problems > 1 ? 's' : ''} still to fix (see above). Re-run "npx -y @anuraghq/mobius init" after fixing.\n`
-    : `\nReady. Restart your agent, then ask it: "What devices are connected?"\n`);
+    : `\nReady${manual ? ` (${manual} client${manual > 1 ? 's need' : ' needs'} a manual step above)` : ''}. Restart your agent, then ask it: "What devices are connected?"\n`);
   process.exit(problems ? 1 : 0);
 } else if (cmd === '--help' || cmd === '-h' || cmd === 'help') {
   process.stdout.write(HELP);

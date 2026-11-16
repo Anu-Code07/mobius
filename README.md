@@ -7,7 +7,7 @@ Mobius is an [MCP](https://modelcontextprotocol.io) server that lets Claude Code
 **Website and film:** https://anu-code07.github.io/mobius/
 
 ```bash
-npx -y @anuraghq/mobius init
+npx -y @anuraghq/mobius@latest init
 ```
 
 One command checks your machine, sets up Android and iOS, and adds Mobius to Claude Code, Cursor and Claude Desktop. Then ask your agent: *"Open Settings on my phone and turn on dark mode."*
@@ -33,13 +33,16 @@ One command checks your machine, sets up Android and iOS, and adds Mobius to Cla
 ## Quick start
 
 ```bash
-npx -y @anuraghq/mobius init
+npx -y @anuraghq/mobius@latest init
 ```
 
 That one command:
 - checks Node, the driver, Android (`adb` and connected devices) and iOS (Xcode, iPhones, simulators), and prints the exact fix for anything missing;
 - builds the iOS runner on a Mac with Xcode, signed with your Apple team, which it finds in your keychain (no team id to look up);
-- adds Mobius to the agents on this machine: Claude Code, Cursor and Claude Desktop. It never overwrites an existing entry and backs up any file it changes.
+- installs `adb` with Homebrew if it's missing;
+- adds Mobius to every MCP client on this machine: Claude Code, Codex, Cursor, VS Code, Claude Desktop, Windsurf, Gemini CLI, Copilot CLI, Kiro, Amp, Antigravity and opencode. In a terminal it asks first; it never overwrites an existing entry and backs up any file it changes.
+
+You don't even need to run it for iOS: the first time Mobius sees an iPhone or simulator, it builds its iOS runner in the background and tells your agent when it's ready.
 
 Then restart your agent and ask: *"What devices are connected?"*
 
@@ -49,15 +52,105 @@ Re-run `init` any time; it is safe and only does what is still missing. `npx -y 
 
 Paste this into Claude Code, Cursor or any agent with a terminal:
 
-> Install Mobius so you can use my phone: run `npx -y @anuraghq/mobius init`, fix anything it marks with ✗ that you can fix from the terminal, tell me about anything only I can do on the phone, then restart and list my devices.
+> Install Mobius so you can use my phone: run `npx -y @anuraghq/mobius@latest init`, fix anything it marks with ✗ that you can fix from the terminal, tell me about anything only I can do on the phone, then restart and list my devices.
 
 **Instructions for agents installing Mobius**
-1. Run `npx -y @anuraghq/mobius init`. Lines start with `✓` (fine), `✗` (a problem, followed by `→` and the exact fix) or `·` (information).
+1. Run `npx -y @anuraghq/mobius@latest init`. Lines start with `✓` (fine), `✗` (a problem, followed by `→` and the exact fix) or `·` (information).
 2. Fix what you can from the terminal, for example `brew install android-platform-tools` when `adb` is missing, then run `init` again.
 3. Some fixes need the human, so ask them: accept "Allow USB debugging?" on an Android phone; unlock an iPhone and tap Trust; turn on Developer Mode (Settings → Privacy & Security → Developer Mode); add an Apple ID in Xcode (Settings → Accounts) if no certificate exists.
 4. If `init` lists more than one Apple team, ask the human which one to use, then run `MOBIUS_TEAM_ID=<that id> npx -y @anuraghq/mobius setup-ios`.
 5. When `init` ends with "Ready", the MCP server is registered. Restart the agent session (or reload MCP servers) and call `device_list`.
 6. The first action on a new iPhone takes about 20 seconds while the runner installs. That is expected, not a hang.
+
+### Install in your agent
+
+[<img src="https://cursor.com/deeplink/mcp-install-dark.svg" alt="Install in Cursor" height="32">](https://cursor.com/en/install-mcp?name=Mobius&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBhbnVyYWdocS9tb2JpdXNAbGF0ZXN0IiwibWNwIl19)
+[<img src="https://img.shields.io/badge/VS_Code-Install_Mobius-0098FF?style=flat-square" alt="Install in VS Code" height="32">](https://insiders.vscode.dev/redirect?url=vscode%3Amcp%2Finstall%3F%257B%2522name%2522%253A%2522mobius%2522%252C%2522command%2522%253A%2522npx%2522%252C%2522args%2522%253A%255B%2522-y%2522%252C%2522%2540anuraghq%2Fmobius%2540latest%2522%252C%2522mcp%2522%255D%257D)
+[<img src="https://goose-docs.ai/img/extension-install-dark.svg" alt="Install in Goose" height="32">](https://goose-docs.ai/extension?cmd=npx&arg=-y&arg=%40anuraghq%2Fmobius%40latest&arg=mcp&id=mobius&name=Mobius&description=Let%20AI%20agents%20use%20a%20real%20phone%2C%20safely)
+
+`init` above configures every client it finds. To add Mobius to one client by hand, the standard config is:
+
+```json
+{ "mcpServers": { "mobius": { "command": "npx", "args": ["-y", "@anuraghq/mobius@latest", "mcp"] } } }
+```
+
+<details><summary>Claude Code</summary>
+
+```bash
+claude mcp add mobius -s user -- npx -y @anuraghq/mobius@latest mcp
+```
+</details>
+
+<details><summary>Codex</summary>
+
+```bash
+codex mcp add mobius -- npx -y @anuraghq/mobius@latest mcp
+```
+Or in `~/.codex/config.toml`:
+```toml
+[mcp_servers.mobius]
+command = "npx"
+args = ["-y", "@anuraghq/mobius@latest", "mcp"]
+```
+</details>
+
+<details><summary>Cursor</summary>
+
+Use the button above, or add the standard config to `~/.cursor/mcp.json`.
+</details>
+
+<details><summary>VS Code</summary>
+
+Use the button above, or add to your user `mcp.json` (Command Palette → "MCP: Open User Configuration"):
+```json
+{ "servers": { "mobius": { "type": "stdio", "command": "npx", "args": ["-y", "@anuraghq/mobius@latest", "mcp"] } } }
+```
+</details>
+
+<details><summary>Claude Desktop</summary>
+
+Add the standard config to `claude_desktop_config.json` (Settings → Developer → Edit Config).
+</details>
+
+<details><summary>Gemini CLI</summary>
+
+```bash
+gemini mcp add -s user mobius npx -y @anuraghq/mobius@latest mcp
+```
+</details>
+
+<details><summary>Windsurf, Kiro, Antigravity</summary>
+
+Add the standard config to `~/.codeium/windsurf/mcp_config.json`, `~/.kiro/settings/mcp.json` or `~/.gemini/config/mcp_config.json`.
+</details>
+
+<details><summary>Copilot CLI</summary>
+
+In `~/.copilot/mcp-config.json`:
+```json
+{ "mcpServers": { "mobius": { "type": "local", "command": "npx", "args": ["-y", "@anuraghq/mobius@latest", "mcp"], "tools": ["*"] } } }
+```
+</details>
+
+<details><summary>Amp, Goose, opencode, Cline and others</summary>
+
+Amp: `amp mcp add mobius -- npx -y @anuraghq/mobius@latest mcp`. Goose: the button above. opencode, in `~/.config/opencode/opencode.json`:
+```json
+{ "mcp": { "mobius": { "type": "local", "command": ["npx", "-y", "@anuraghq/mobius@latest", "mcp"], "enabled": true } } }
+```
+Any other MCP client: the standard config, command `npx -y @anuraghq/mobius@latest mcp`.
+</details>
+
+### Verify it works
+
+Ask your agent: *"List my devices."* You should see your emulators, simulators and connected phones. If iPhones are missing on the first try, the iOS runner is still building in the background (about 2 minutes, once); the agent is told so. Anything else: `npx -y @anuraghq/mobius doctor`.
+
+| Platform | Works with | You need |
+|---|---|---|
+| Android emulator | ✅ | Android SDK (`adb`), an emulator running |
+| Android phone | ✅ | `adb`, USB debugging on and accepted |
+| iOS simulator | ✅ | Xcode, a simulator booted |
+| iPhone | ✅ | Xcode, an Apple ID (free works), Developer Mode on, the Mac trusted |
 
 ### Requirements
 

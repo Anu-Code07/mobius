@@ -14,6 +14,8 @@ export class Mobius {
   readonly approver: Approver;
   /** Real CLI only: keep element ids resolvable across Mobius restarts (identity hashes on disk, never screen text). */
   persistIds = false;
+  /** Setup state the agent should know about (e.g. the iOS runner building in the background), shown by device_list. */
+  notes: () => string[] = () => [];
 
   readonly plane: PlaneContext;
 

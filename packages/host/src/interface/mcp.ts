@@ -109,7 +109,11 @@ export function createServer(mobius: Mobius): McpServer {
     description: 'List connected devices (emulators, simulators, USB phones) with platform, OS and state.',
     inputSchema: {},
     annotations: { readOnlyHint: true },
-  }, safe(async () => json({ devices: await Promise.all((await mobius.refresh()).map(s => s.connector.info())) })));
+  }, safe(async () => {
+    const devices = await Promise.all((await mobius.refresh()).map(s => s.connector.info()));
+    const notes = mobius.notes();
+    return json({ devices, ...(notes.length ? { notes } : {}) });
+  }));
 
   reg('device_capabilities', {
     description: 'What this device can and cannot do through Mobius, including known limitations. Check before planning.',

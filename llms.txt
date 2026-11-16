@@ -4,7 +4,7 @@
 
 ## Install (for agents)
 
-1. Run `npx -y @anuraghq/mobius init`. It checks the machine, builds the iOS runner on macOS, and registers Mobius with Claude Code, Cursor and Claude Desktop.
+1. Run `npx -y @anuraghq/mobius@latest init`. It checks the machine, builds the iOS runner on macOS, and registers Mobius with every MCP client it finds (Claude Code, Codex, Cursor, VS Code, Claude Desktop, Windsurf, Gemini CLI, Copilot CLI, Kiro, Amp, Antigravity, opencode).
 2. Output lines start with ✓ (fine), ✗ (problem; the next line starting with → is the exact fix) or · (information). Fix ✗ items you can from the terminal, then re-run `init`.
 3. Ask the human for steps only they can do: accept "Allow USB debugging?" on Android; unlock the iPhone and tap Trust; enable Developer Mode; add an Apple ID in Xcode if no certificate exists; choose an Apple team if several are listed (then run `MOBIUS_TEAM_ID=<id> npx -y @anuraghq/mobius setup-ios`).
 4. When it prints "Ready", restart the agent session and call the `device_list` tool.
