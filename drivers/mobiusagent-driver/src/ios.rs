@@ -608,7 +608,7 @@ pub fn handle(op: &str, udid: &str, req: &Value, max_jpeg: impl Fn(&[u8], u32) -
             match o { Ok(o) if o.status.success() => Ok(json!({ "matched": ok })), _ => Err("biometric simulation works on iOS simulators (real iPhones need a real face)".into()) }
         }
         "dark_mode" => match req["on"].as_bool() {
-            Some(on) => act(udid, "POST", "/wda/device/appearance", json!({ "name": if on { "dark" } else { "light" } })).map(|_| json!({})),
+            Some(on) => http(udid, "POST", "/wda/device/appearance", Some(&json!({ "name": if on { "dark" } else { "light" } }))).map(|_| json!({})),
             None => { let r = http(udid, "GET", "/wda/device/info", None)?; Ok(json!({ "on": r["value"]["userInterfaceStyle"] == "dark" })) }
         },
         "perf" | "font_scale" | "app_locale" | "battery" | "network" | "permission" =>
