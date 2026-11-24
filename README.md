@@ -210,8 +210,10 @@ For every action, in this order:
 1. **Hard blocks** (`blocked_apps`): banking, trading, UPI and password-manager apps can't be opened or read at all. Back, Home and Recents always work so the agent can leave. **No rule can loosen a hard block.**
 2. **What the app declares** (`mobius:payment:438:INR` on a control): trusted over any label.
 3. **What the target says, and what is drawn under the finger**: commit words in any wording (`risky_words`, 6 Indian languages, icon glyphs like `➤`), look-alike letters, words split across views, text read from the pixels (OCR) when the label is missing or lies.
-4. **Context**: a plain "Continue" on a screen showing an amount due, slide-to-pay gestures, OS permission prompts, typing into password/PIN/OTP fields (`secret_entry`), submitting text (`submit`), any action in `approval_apps` (messaging, social, fintech).
+4. **Context**: a plain "Continue" on a screen showing an amount due, slide-to-pay gestures, OS permission prompts, typing into password/PIN/OTP fields (`secret_entry`), submitting text (`submit`), any action in `approval_apps` (messaging, social).
 5. **Your rules** (`rules`): first match wins and can change the decision (except a hard block).
+
+**Changing the policy at runtime.** Agents see the policy with `mobius_get_policy` and edit `blocked_apps`, `approval_apps` or `risky_words` with `mobius_update_policy`. Adding an entry makes the policy stricter and applies at once. Removing one loosens it, so the user must approve it first (the same dialog, with Touch ID on macOS). Every change is written to the audit log and saved to `~/.mobius/policy.json` (or `MOBIUS_POLICY`).
 
 The result is `allow`, `approval_required` or `blocked`, with an **action class** (`payment`, `booking`, `send`, `delete`, `account`, `install`, `permission`, `secret`) and the rule id, all recorded in the audit log.
 
@@ -282,7 +284,7 @@ Point `MOBIUS_POLICY` at a JSON file. Fields you set **replace** the default for
 | `version` | `"default"` | Your label, recorded on every audit entry; signed sessions can be pinned to it |
 | `rules` | `[]` | The rules above |
 | `blocked_apps` | banking, trading, UPI, password managers | Apps that are refused outright (regexes on app-id segments) |
-| `approval_apps` | messaging, social, card/fintech apps | Apps where every state change asks |
+| `approval_apps` | messaging, social apps | Apps where every state change asks |
 | `risky_words` | pay, order, buy, book, send, delete, confirm … in 7 languages | Words that make a tap ask |
 | `secret_entry` | `approval_required` | Typing into password / PIN / OTP fields |
 | `submit` | `approval_required` | Pressing Enter or submitting text |

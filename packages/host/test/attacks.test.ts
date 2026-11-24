@@ -75,8 +75,8 @@ const CORPUS: Case[] = [
   { name: 'open a banking app', ctx: { tool: 'open_app', mutating: true, app: null, target: null, targetApp: 'com.snapwork.hdfc' }, want: 'blocked' },
   { name: 'act inside PhonePe', ctx: tap({ text: 'Home' }, { app: 'com.phonepe.app' }), want: 'blocked' },
   { name: 'act inside a password manager', ctx: tap({ text: 'Copy' }, { app: 'com.agilebits.onepassword' }), want: 'blocked' },
-  { name: 'card app: any tap asks', ctx: tap({ text: 'Rewards' }, { app: 'cards.scapia.ios' }), want: 'approval_required' },
-  { name: 'CRED: any tap asks', ctx: tap({ text: 'Rewards' }, { app: 'com.dreamplug.androidapp' }), want: 'approval_required' },
+  { name: 'card app: Pay still asks', ctx: tap({ text: 'Pay ₹438' }, { app: 'cards.scapia.ios' }), want: 'approval_required' },
+  { name: 'card app: PIN entry still asks', ctx: { tool: 'type', mutating: true, app: 'com.dreamplug.androidapp', target: null, secretField: true }, want: 'approval_required' },
   { name: 'WhatsApp: any tap asks', ctx: tap({ text: 'Chats' }, { app: 'com.whatsapp' }), want: 'approval_required' },
   { name: 'dangerous URL scheme', ctx: { tool: 'open_url', mutating: true, app: null, target: null, url: 'intent://pay#Intent;end' }, want: 'blocked' },
   // Controls: must NOT ask (approval fatigue kills adoption)
@@ -87,6 +87,7 @@ const CORPUS: Case[] = [
   { name: 'control: unlabeled button on a non-money screen', ctx: tap({}, { screen: [el({ role: 'text', text: 'Settings' })] }), want: 'allow' },
   { name: 'control: x,y on a labelled harmless element', ctx: tap({ text: 'Filters' }, { coordinate: true }), want: 'allow' },
   { name: 'control: taxi app is not "axis" bank', ctx: tap({ text: 'Home' }, { app: 'com.taxis.app' }), want: 'allow' },
+  { name: 'control: card app plain tap (Scapia Rewards)', ctx: tap({ text: 'Rewards' }, { app: 'com.scapia.cards' }), want: 'allow' },
   { name: 'control: Swiggy is not blocked', ctx: tap({ text: 'Home' }, { app: 'bundl.swiggy' }), want: 'allow' },
 ];
 

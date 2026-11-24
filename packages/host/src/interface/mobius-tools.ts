@@ -3,6 +3,7 @@
 // Every tool routes through Mobius's own handlers or session pipeline: policy gate, approvals, verification and audit apply.
 // MOBIUS_MOBILE_ALIASES=1 also registers them under `mobile_*` names, for agents and prompts that use that naming.
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
@@ -15,6 +16,7 @@ import { scrub } from '../execution/observe.ts';
 import { center } from '../execution/session.ts';
 import type { Element, Observation } from '../core/protocol.ts';
 import type { Mobius } from '../infrastructure/registry.ts';
+import { EDITABLE_LISTS, newApprovalId, type EditableList } from '../policy/policy.ts';
 
 type Handler = (a: any) => Promise<any>;
 type Out = { content: { type: string; text?: string }[]; isError?: boolean };
@@ -462,5 +464,31 @@ export function registerMobiusTools(server: McpServer, handlers: Map<string, Han
         if (out.isError) break;
       }
       return json({ results });
+    });
+
+  // Governance: the human owns the policy. An agent may tighten it on its own (add an app or word), but anything that
+  // loosens it (a removal) goes to the same human approval as a Pay tap. Every change is audited and saved.
+  tool('get_policy', 'Get Policy', 'Show the active Mobius policy: blocked apps, apps where every action asks, risky words, and settings.', {},
+    async () => {
+      const c = mobius.policy.config;
+      return json({ file: mobius.policy.file ?? null, version: c.version, blocked_apps: c.blocked_apps, approval_apps: c.approval_apps, risky_words: c.risky_words,
+        secret_entry: c.secret_entry, submit: c.submit, rules: c.rules.length, dry_run: c.dry_run });
+    }, true);
+
+  tool('update_policy', 'Update Policy', 'Add or remove entries in a policy list. blocked_apps / approval_apps take app-id patterns (e.g. "scapia" matches com.scapia.cards); risky_words take words that make a tap ask. Adding (stricter) applies at once; removing (looser) asks the user to approve first.',
+    { list: z.enum(EDITABLE_LISTS), action: z.enum(['add', 'remove']), values: z.array(z.string().min(1).max(100)).min(1).max(20) },
+    async ({ list, action, values }: { list: EditableList; action: 'add' | 'remove'; values: string[] }) => {
+      const t0 = Date.now();
+      const loosens = action === 'remove';
+      if (loosens) {
+        const summary = `Remove ${values.map(v => `"${v}"`).join(', ')} from ${list}`.slice(0, 200);
+        const out = await mobius.approver.request({ id: newApprovalId(), device_id: 'host', app: null, tool: 'update_policy', summary, reason: 'loosens the Mobius policy', action_class: 'account', virtual_device: false }, mobius.policy.config.approval_timeout_s);
+        if (out !== 'approved') throw new MobiusError(out === 'expired' ? 'APPROVAL_EXPIRED' : 'APPROVAL_REJECTED', `Policy change not approved: ${summary}`, { hint: 'Do not retry. Ask the user to change the policy themselves.' });
+      }
+      let changed: string[];
+      try { changed = mobius.policy.edit(list, action, values); } catch (e) { throw new MobiusError('INVALID_INPUT', `Not a valid pattern: ${(e as Error).message}`); }
+      mobius.audit.record({ action_id: `pol_${randomUUID().slice(0, 8)}`, device_id: 'host', tool: 'update_policy', params: { list, action, values }, status: 'success', error_code: null,
+        duration_ms: Date.now() - t0, agent: mobius.plane.agent(), session_id: mobius.plane.session_id, decision: loosens ? 'approval_required' : 'allow', rule_id: 'governance.policy_edit', action_class: 'account', amount: null });
+      return json({ changed, list, now: mobius.policy.config[list], saved_to: mobius.policy.file ?? null });
     });
 }

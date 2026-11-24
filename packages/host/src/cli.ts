@@ -53,7 +53,7 @@ function iosNotes(): string[] {
     default: return [];
   }
 }
-import { defaultApprover, Policy } from './policy/policy.ts';
+import { defaultApprover, loadPolicy, Policy, policyFile } from './policy/policy.ts';
 import { writeFileSync, rmSync } from 'node:fs';
 import { killSwitchPath, revokedPath } from './infrastructure/plane.ts';
 import { mobiusHome } from './observability/audit.ts';
@@ -110,7 +110,7 @@ async function checks(o: CheckOpts = {}): Promise<number> {
   const bad = (m: string, fix: string) => { problems++; badLine(m, fix); };
   say('Basics');
   const [maj = 0, min = 0] = process.versions.node.split('.').map(Number);
-  maj > 22 || (maj === 22 && min >= 5) ? okLine(`Node ${process.versions.node}`) : bad(`Node ${process.versions.node} is too old`, 'Install Node 22.5 or newer (https://nodejs.org)');
+  maj > 22 || (maj === 22 && min >= 5) ? okLine('Node.js') : bad(`Node ${process.versions.node} is too old`, 'Install Node 22.5 or newer (https://nodejs.org)');
   driverBuilt() ? okLine(`Device driver for ${process.platform}-${process.arch}`) : bad(`No device driver for ${process.platform}-${process.arch}`, 'The npm package ships the Apple Silicon Mac driver. Build it from https://github.com/Anu-Code07/mobius and set MOBIUS_DRIVER_BIN.');
   say('\nAndroid');
   const adb = await sh('adb', ['devices']);
@@ -321,7 +321,7 @@ if (cmd === 'mcp') {
   const mobius = new Mobius(
     connectors(driver),
     audit,
-    new Policy(),
+    new Policy(loadPolicy(policyFile()), policyFile()),
     defaultApprover(),
   );
   mobius.persistIds = true;
@@ -351,7 +351,7 @@ if (cmd === 'mcp') {
   if (!token) { token = randomBytes(24).toString('base64url'); process.stderr.write(`MOBIUS_API_TOKEN not set; generated one for this run:\n  ${token}\n`); }
   const driver = new MobiusAgentDriver();
   const audit = new AuditLog();
-  const mobius = new Mobius(connectors(driver), audit, new Policy(), defaultApprover());
+  const mobius = new Mobius(connectors(driver), audit, new Policy(loadPolicy(policyFile()), policyFile()), defaultApprover());
   mobius.persistIds = true;
   mobius.notes = iosNotes;
   const engine = await createEngine(mobius);

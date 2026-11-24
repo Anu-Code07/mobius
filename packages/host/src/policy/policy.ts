@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { mobiusHome } from '../observability/audit.ts';
 import type { Element } from '../core/protocol.ts';
 
 export type Decision = 'allow' | 'approval_required' | 'blocked';
@@ -53,8 +55,8 @@ export const DEFAULT_POLICY: PolicyConfig = {
   approval_apps: [
     // messaging / social: everything they do is "send"
     'whatsapp', 'telegram', 'messag', 'mobilesms', 'mms', 'gmail', 'outlook', 'slack', 'instagram', 'twitter', 'x(\\.|$)', 'linkedin', 'facebook',
-    // card and fintech apps: usable (travel, rewards) but every state change asks
-    'scapia', 'dreamplug', 'cred', 'slice', 'onecard', 'jupiter', 'niyo', 'pnb', 'fi\\.money',
+    // ponytail: card/fintech apps (Scapia, CRED...) are NOT here: asking on every tap made them unusable. Their Pay/Book/
+    // Confirm buttons, money screens, unlabeled or x,y taps and PIN/OTP fields still ask via the target/context layers.
   ],
   risky_words: [
     // 'book'/'request'/'checkout': live run found "book Cab Non AC service" (Rapido), "Request Uber Go", "Slide to book" slipping through.
@@ -77,11 +79,17 @@ export const DEFAULT_POLICY: PolicyConfig = {
   dry_run: false,
 };
 
-export function loadPolicy(): PolicyConfig {
-  const p = process.env.MOBIUS_POLICY;
-  if (!p) return DEFAULT_POLICY;
+/** Where the running server's policy lives: MOBIUS_POLICY, else ~/.mobius/policy.json (written by mobius_update_policy). */
+export const policyFile = () => process.env.MOBIUS_POLICY ?? join(mobiusHome(), 'policy.json');
+
+export function loadPolicy(p = process.env.MOBIUS_POLICY): PolicyConfig {
+  if (!p || !existsSync(p)) return DEFAULT_POLICY;
   return { ...DEFAULT_POLICY, ...(JSON.parse(readFileSync(p, 'utf8')) as Partial<PolicyConfig>) };
 }
+
+/** Lists an agent may edit at runtime (mobius_update_policy). Adding tightens; removing loosens and needs a human. */
+export const EDITABLE_LISTS = ['blocked_apps', 'approval_apps', 'risky_words'] as const;
+export type EditableList = (typeof EDITABLE_LISTS)[number];
 
 export interface PolicyContext {
   tool: string;
@@ -188,15 +196,38 @@ export interface Verdict {
 
 export class Policy {
   readonly config: PolicyConfig;
-  private blocked: RegExp | null;
-  private approvalApps: RegExp | null;
-  private risky: RegExp;
+  /** Where edits are saved; unset = in-memory only (tests). */
+  readonly file: string | undefined;
+  private blocked!: RegExp | null;
+  private approvalApps!: RegExp | null;
+  private risky!: RegExp;
 
-  constructor(config: PolicyConfig = loadPolicy()) {
-    this.config = config;
-    this.blocked = appRe(config.blocked_apps);
-    this.approvalApps = appRe(config.approval_apps);
-    this.risky = wordRe(config.risky_words);
+  constructor(config: PolicyConfig = loadPolicy(), file?: string) {
+    // Own copies of the lists: edits must never mutate DEFAULT_POLICY.
+    this.config = { ...config, blocked_apps: [...config.blocked_apps], approval_apps: [...config.approval_apps], risky_words: [...config.risky_words] };
+    this.file = file;
+    this.compile();
+  }
+
+  private compile() {
+    this.blocked = appRe(this.config.blocked_apps);
+    this.approvalApps = appRe(this.config.approval_apps);
+    this.risky = wordRe(this.config.risky_words);
+  }
+
+  /** Add or remove entries from one list, recompile, and save to `file`. Returns what actually changed. */
+  edit(list: EditableList, op: 'add' | 'remove', values: string[]): string[] {
+    const cur = this.config[list];
+    if (list !== 'risky_words') for (const v of values) new RegExp(v); // invalid pattern throws before anything changes
+    const changed = op === 'add' ? values.filter(v => !cur.includes(v)) : values.filter(v => cur.includes(v));
+    if (!changed.length) return [];
+    this.config[list] = op === 'add' ? [...cur, ...changed] : cur.filter(v => !changed.includes(v));
+    this.compile();
+    if (this.file) {
+      const saved = existsSync(this.file) ? JSON.parse(readFileSync(this.file, 'utf8')) : {};
+      writeFileSync(this.file, JSON.stringify({ ...saved, [list]: this.config[list] }, null, 2) + '\n', { mode: 0o600 });
+    }
+    return changed;
   }
 
   appBlocked(app: string | null): boolean { return !!app && !!this.blocked?.test(app); }
@@ -458,7 +489,7 @@ export function defaultApprover(): Approver {
   if (fixed === 'approved' || fixed === 'rejected' || fixed === 'expired') return new FixedApprover(fixed);
   const hook = process.env.MOBIUS_APPROVAL_WEBHOOK;
   if (hook) return new WebhookApprover(hook, process.env.MOBIUS_APPROVAL_TOKEN);
-  return process.platform === 'darwin' ? new MacDialogApprover(loadPolicy().approval_auth) : new DenyApprover();
+  return process.platform === 'darwin' ? new MacDialogApprover(loadPolicy(policyFile()).approval_auth) : new DenyApprover();
 }
 
 export const newApprovalId = () => `apr_${randomUUID().slice(0, 8)}`;

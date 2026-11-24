@@ -308,3 +308,16 @@ test('secrets vault: secret_ref is typed but never returned or logged', async ()
   assert.ok(!fake.typed.includes('tok-123'));
   delete process.env.MOBIUS_TEST_SECRET; delete process.env.MOBIUS_SECRETS; delete process.env.MOBIUS_APPROVAL_TOKEN_TEST;
 });
+
+test('governance: an agent tightens the policy freely; loosening needs a human', async () => {
+  const { call, approver, mobius } = await setup('rejected');
+  const added = await call('mobius_update_policy', { list: 'approval_apps', action: 'add', values: ['fake'] });
+  assert.deepEqual(added.changed, ['fake']);
+  assert.equal(approver.requests.length, 0, 'tightening asks no one');
+  assert.equal(mobius.policy.evaluate({ tool: 'tap', mutating: true, app: 'com.fake', target: null }).decision, 'approval_required');
+  const removed = await call('mobius_update_policy', { list: 'approval_apps', action: 'remove', values: ['fake'] });
+  assert.equal(removed.error.code, 'APPROVAL_REJECTED');
+  assert.ok(mobius.policy.config.approval_apps.includes('fake'), 'a rejected loosening changes nothing');
+  assert.equal(approver.requests.at(-1)?.summary, 'Remove "fake" from approval_apps');
+  assert.ok(new Policy().config.approval_apps.every(a => a !== 'fake'), 'defaults untouched');
+});
